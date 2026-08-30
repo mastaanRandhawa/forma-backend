@@ -217,3 +217,43 @@ finish:
 
 Everything is upsert-by-natural-key, so an offline client can replay its queue
 without duplicating rows. `POST /sessions/:id/finish` is idempotent.
+
+---
+
+## Adaptation engine (§2 of BACKEND-REQUIREMENTS.md)
+
+`POST /sessions { workoutId }` now seeds each `performance` with a **prescribed
+target** derived from history, not the template:
+
+```
+performance.prescribedWeightKg / prescribedReps / prescribedRpe
+performance.prescriptionAudit  → RecommendationAudit { rule, inputs, output }
+```
+
+The prescription is deterministic (`services/prescription.ts`, unit-tested — no
+LLM). Rule branches: `no_history → template_target`, `top_of_range_rpe<=8 → +2.5%`
+(`<=7 → +5%`), `mid_range_rpe_8-9 → hold_load_+1_rep`, `missed_bottom_of_range → -10%`,
+`rpe>9_on_2+_sets → -10%`, `deload_week → -10%_load_rpe<=7`.
+
+`GET /sessions` and `GET /sessions/:id` include `performances[].prescriptionAudit`.
+The `POST /sessions` response also carries `readinessAdjustment` (session-scoped
+low-readiness modifier — a no-op, and says so, until a recovery input exists).
+
+| Method & path | Purpose |
+|---|---|
+| `POST /progress/checkin` | manual recovery check-in `{ sleepH?, sleepQuality?, fatigue?, soreness?, note? }` → readiness input; response includes recomputed readiness |
+| `GET /progress/checkin` | recent check-ins |
+| `GET /progress/consistency` | now also returns `days[]` — per-day session counts for the last 13 weeks (server-side) |
+| `GET /programs/:id/schedule` | resolved upcoming sessions with `status: scheduled \| completed \| missed \| rescheduled` (needs `program.startDate` + `preferredWeekdays`) |
+| `POST /programs/generate` | accepts `preferredWeekdays[]` (0=Sun..6=Sat) and `startDate` |
+| `POST /me/health/samples` | batch health-metric ingest from the mobile companion — `{ provider, samples: [{ type, value, unit, recordedAt }] }`; idempotent (dedup on userId+type+recordedAt) |
+| `GET /me/devices/:provider/connect` | start a WHOOP / Oura / Garmin OAuth flow — `501` until provider secrets are configured |
+| `POST /workouts/swap-suggestions` | ranking now also scores movement-pattern match, difficulty ≤ user ceiling, and "not trained in the last 2 weeks"; each result carries a one-line `rationale` |
+
+Dashboard (`GET /dashboard`) gained provenance flags: `readinessAvailable`,
+`formAvailable` (`live` \| `unavailable`) and `volumeSource` (`computed` \|
+`unavailable`) so the web renders "—" instead of a stale zero.
+
+Worker job `rescheduleMissedWorkouts` (daily 04:15) shifts past-due scheduled
+program workouts to the next preferred weekday and marks the `ProgramDay`
+`rescheduled`.

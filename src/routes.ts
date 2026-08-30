@@ -18,12 +18,14 @@ import { achievementsRouter } from "./modules/achievements.js";
 import { subscriptionRouter } from "./modules/subscription.js";
 import { docsRouter } from "./modules/docs.js";
 import { configRouter } from "./modules/config.js";
+import { oauthRouter } from "./modules/oauth.js";
 
 export const api = Router();
 
 api.get("/health", (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 api.use("/docs", docsRouter); // GET /docs, /docs/openapi.json, /docs/openapi.yaml
 api.use("/config", configRouter); // GET /config/appearance-presets (auth optional)
+api.use("/oauth", oauthRouter); // GET /oauth/:provider/callback — wearable OAuth (public, state-signed)
 
 api.use("/auth", authLimiter, authRouter);
 api.use("/me", meRouter);

@@ -8,6 +8,8 @@ import { GOAL_TEMPLATES } from "../data/store.js";
 import { SAFETY_WIDGETS } from "../data/progression.js";
 import { getSettingsBundle, applySettingsPatch, settingsPatchSchema } from "../services/settings.js";
 import { ensureProgression, evaluateProgression, setGating } from "../services/progression.js";
+import { authorizeUrl, isConfigured, providerConfig, revokeConnection, syncConnection, type WearableProvider } from "../services/wearables.js";
+import { badRequest, notFound } from "../lib/errors.js";
 
 export const meRouter = Router();
 meRouter.use(requireAuth);
@@ -286,8 +288,143 @@ meRouter.put(
 );
 
 meRouter.get("/devices", asyncHandler(async (req, res) => {
-  res.json(await prisma.deviceConnection.findMany({ where: { userId: uid(req) } }));
+  const rows = await prisma.deviceConnection.findMany({ where: { userId: uid(req) } });
+  // never leak provider tokens to the client
+  res.json(
+    rows.map(({ accessToken, refreshToken, ...safe }) => ({
+      ...safe,
+      oauthConnected: !!accessToken,
+    })),
+  );
 }));
+
+/**
+ * Start a third-party wearable OAuth flow (§3.3). Returns the provider consent
+ * URL for the client to open; `409` (not `501`) when the provider's client
+ * credentials aren't configured on this deployment.
+ */
+meRouter.get(
+  "/devices/:provider/connect",
+  validate({ params: z.object({ provider: z.enum(["whoop", "oura", "garmin"]) }) }),
+  asyncHandler(async (req, res) => {
+    const provider = req.params.provider as WearableProvider;
+    if (!isConfigured(provider)) {
+      const cfg = providerConfig(provider);
+      // 200, not an error — the client shows the message and stays put.
+      return res.json({
+        provider,
+        configured: false,
+        status: "not_configured",
+        message: cfg.kind === "unavailable" ? cfg.reason : "not configured",
+      });
+    }
+    res.json({ provider, configured: true, authorizeUrl: authorizeUrl(uid(req), provider) });
+  }),
+);
+
+/** Manually trigger a sync for a connected wearable. */
+meRouter.post(
+  "/devices/:provider/sync",
+  validate({ params: z.object({ provider: z.enum(["whoop", "oura", "garmin"]) }) }),
+  asyncHandler(async (req, res) => {
+    const provider = req.params.provider as WearableProvider;
+    const conn = await prisma.deviceConnection.findUnique({
+      where: { userId_provider: { userId: uid(req), provider } },
+    });
+    if (!conn) throw notFound("Not connected");
+    if (!conn.accessToken) throw badRequest("This connection has no OAuth token — reconnect it");
+    const result = await syncConnection(conn.id);
+    res.json(result);
+  }),
+);
+
+meRouter.delete(
+  "/devices/:provider",
+  validate({ params: z.object({ provider: z.string() }) }),
+  asyncHandler(async (req, res) => {
+    await revokeConnection(uid(req), req.params.provider as WearableProvider);
+    res.status(204).end();
+  }),
+);
+
+/**
+ * Batch health-metric ingest from the mobile companion (§3.2). Idempotent:
+ * dedups on (userId, metricType, recordedAt) so re-syncs are safe. Only writes
+ * real rows; DeviceConnection.lastSyncAt advances only on success.
+ */
+const healthSampleSchema = z.object({
+  provider: z.enum(["apple_health", "health_connect"]),
+  samples: z
+    .array(
+      z.object({
+        type: z.enum(["sleep", "hrv", "resting_hr", "steps"]),
+        value: z.number(),
+        unit: z.string(),
+        recordedAt: z.coerce.date().optional(),
+        date: z.coerce.date().optional(),
+        start: z.coerce.date().optional(),
+        end: z.coerce.date().optional(),
+        sourceBundleId: z.string().optional(),
+      }),
+    )
+    .max(2000),
+});
+
+meRouter.post(
+  "/health/samples", // → POST /me/health/samples
+  validate({ body: healthSampleSchema }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const { provider, samples } = req.body as z.infer<typeof healthSampleSchema>;
+
+    await prisma.deviceConnection.upsert({
+      where: { userId_provider: { userId, provider } },
+      update: {},
+      create: { userId, provider, status: "connected" },
+    });
+
+    try {
+      const normalized = samples.map((s) => ({
+        userId,
+        metricType: s.type as never,
+        value: s.value,
+        unit: s.unit,
+        recordedAt: s.recordedAt ?? s.end ?? s.date ?? new Date(),
+        source: "health_sync" as const,
+      }));
+
+      // dedup against what's already stored in the same instants
+      const existing = await prisma.progressMetric.findMany({
+        where: {
+          userId,
+          source: "health_sync",
+          metricType: { in: [...new Set(normalized.map((n) => n.metricType))] },
+          recordedAt: { in: normalized.map((n) => n.recordedAt) },
+        },
+        select: { metricType: true, recordedAt: true },
+      });
+      const seen = new Set(existing.map((e) => `${e.metricType}@${e.recordedAt.getTime()}`));
+      const fresh = normalized.filter((n) => !seen.has(`${n.metricType}@${n.recordedAt.getTime()}`));
+
+      if (fresh.length) await prisma.progressMetric.createMany({ data: fresh });
+
+      await prisma.deviceConnection.update({
+        where: { userId_provider: { userId, provider } },
+        data: { lastSyncAt: new Date(), lastError: null, lastErrorAt: null, status: "connected" },
+      });
+
+      res.status(201).json({ received: samples.length, ingested: fresh.length, deduped: samples.length - fresh.length });
+    } catch (err) {
+      await prisma.deviceConnection
+        .update({
+          where: { userId_provider: { userId, provider } },
+          data: { lastError: (err as Error).message.slice(0, 300), lastErrorAt: new Date() },
+        })
+        .catch(() => {});
+      throw err;
+    }
+  }),
+);
 meRouter.put(
   "/devices/:provider",
   validate({ body: z.object({ status: z.enum(["connected", "disconnected"]) }) }),
