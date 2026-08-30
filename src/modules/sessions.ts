@@ -11,6 +11,9 @@ import { generateInsights } from "../services/insights.js";
 import { evaluateProgression } from "../services/progression.js";
 import { sessionComment } from "../services/ai.js";
 import { notify } from "../services/notify.js";
+import { prescribeExercise } from "../services/prescription.js";
+import { shouldDeload } from "../services/deload.js";
+import { readinessAdjustment } from "../services/readiness.js";
 
 export const sessionsRouter = Router();
 sessionsRouter.use(requireAuth);
@@ -46,7 +49,10 @@ sessionsRouter.get(
       await prisma.workoutSession.findUnique({
         where: { id: req.params.id },
         include: {
-          performances: { include: { exercise: true, sets: { orderBy: { setNumber: "asc" } } }, orderBy: { order: "asc" } },
+          performances: {
+            include: { exercise: true, sets: { orderBy: { setNumber: "asc" } }, prescriptionAudit: true },
+            orderBy: { order: "asc" },
+          },
           muscleActivations: { include: { muscleGroup: true } },
           personalRecords: { include: { exercise: true } },
         },
@@ -69,6 +75,9 @@ sessionsRouter.post(
     const userId = uid(req);
     const { workoutId, name, trackingMode } = req.body as { workoutId?: string; name?: string; trackingMode: "camera" | "manual" };
 
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    const unit = user.unitPreference === "imperial" ? "imperial" : "metric";
+
     let workout = null;
     if (workoutId) {
       workout = await prisma.workout.findFirst({
@@ -90,7 +99,88 @@ sessionsRouter.post(
       },
       include: { performances: { include: { exercise: true, sets: true }, orderBy: { order: "asc" } } },
     });
-    res.status(201).json(session);
+
+    // ── adaptation engine (§2) — seed each performance with a prescribed target ──
+    let readinessAdj: Awaited<ReturnType<typeof readinessAdjustment>> | null = null;
+    if (workout && workout.exercises.length) {
+      const [deloadSignal, adj] = await Promise.all([
+        shouldDeload(userId).catch(() => null),
+        readinessAdjustment(userId).catch(() => null),
+      ]);
+      readinessAdj = adj;
+      const deload = !!deloadSignal?.deload;
+
+      for (const perf of session.performances) {
+        const templateEx = workout.exercises.find((e) => e.order === perf.order);
+        if (!templateEx) continue;
+        try {
+          const { prescription, inputs } = await prescribeExercise(
+            userId,
+            perf.exerciseId,
+            {
+              targetRepsMin: templateEx.targetRepsMin,
+              targetRepsMax: templateEx.targetRepsMax,
+              targetWeightKg: templateEx.targetWeightKg,
+            },
+            { unit, deload },
+          );
+          const audit = await prisma.recommendationAudit.create({
+            data: {
+              userId,
+              kind: "prescription",
+              subjectId: perf.exerciseId,
+              inputs: { ...inputs, deloadReason: deloadSignal?.reason ?? null } as never,
+              rule: prescription.rule,
+              output: {
+                targetWeightKg: prescription.targetWeightKg,
+                targetReps: prescription.targetReps,
+                targetRpe: prescription.targetRpe,
+                note: prescription.note,
+              } as never,
+            },
+          });
+          await prisma.exercisePerformance.update({
+            where: { id: perf.id },
+            data: {
+              prescribedWeightKg: prescription.targetWeightKg,
+              prescribedReps: prescription.targetReps,
+              prescribedRpe: prescription.targetRpe,
+              prescriptionAuditId: audit.id,
+            },
+          });
+        } catch {
+          /* prescription is best-effort — never block starting a workout */
+        }
+      }
+
+      if (adj?.applied) {
+        await prisma.recommendationAudit
+          .create({
+            data: {
+              userId,
+              kind: "readiness_adjustment",
+              subjectId: session.id,
+              inputs: { readiness: adj.score } as never,
+              rule: adj.rule,
+              output: {
+                accessorySetDelta: adj.accessorySetDelta,
+                rpeCap: adj.rpeCap,
+                swapHeaviestCompound: adj.swapHeaviestCompound,
+                reason: adj.reason,
+              } as never,
+            },
+          })
+          .catch(() => {});
+      }
+    }
+
+    const full = await prisma.workoutSession.findUniqueOrThrow({
+      where: { id: session.id },
+      include: {
+        performances: { include: { exercise: true, sets: true, prescriptionAudit: true }, orderBy: { order: "asc" } },
+      },
+    });
+    res.status(201).json(Object.assign(full, { readinessAdjustment: readinessAdj }));
   }),
 );
 

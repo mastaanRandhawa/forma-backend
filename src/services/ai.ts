@@ -76,7 +76,11 @@ function buildSystemPrompt(t: TrainerConfig, facts?: Record<string, unknown>) {
     detail,
     t.humor > 0.6 ? "A little humour is fine." : "",
     "Only discuss training, recovery, nutrition basics, and the user's data. Refuse medical diagnosis.",
-    facts ? `Session facts: ${JSON.stringify(facts)}` : "",
+    // §4 — the AI explains deterministic output, it never chooses training numbers.
+    "Any weights, reps, sets, or RPE targets are already decided by Forma's rules engine and passed to you in the facts. Use those exact numbers — never invent or override them.",
+    // §5 — muscle activation is a training-exposure score, not a recovery state.
+    "'Muscle activation' means how much a muscle was worked recently. Never describe a muscle as 'recovered' or 'not recovered' from an activation score.",
+    facts ? `Facts (authoritative): ${JSON.stringify(facts)}` : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -84,7 +88,7 @@ function buildSystemPrompt(t: TrainerConfig, facts?: Record<string, unknown>) {
 
 function cannedReply(ctx: ChatContext): string {
   const m = ctx.userMessage.toLowerCase();
-  if (m.includes("today")) return "Based on your plan, today is upper body push. Chest and shoulders are recovered, so aim to beat your last top set.";
+  if (m.includes("today")) return "Based on your plan, today is upper body push. Aim to beat your last top set on the first compound.";
   if (m.includes("shoulder") || m.includes("pain") || m.includes("hurt"))
     return "Let's play it safe. Drop to a neutral grip, cap RPE at 8, and if it still pinches we swap to a machine press. I've noted it.";
   if (m.includes("progress") || m.includes("bench")) return "Your bench estimated 1RM is trending up about 12% over the last 8 weeks. Keep the current rep ranges for two more weeks.";
