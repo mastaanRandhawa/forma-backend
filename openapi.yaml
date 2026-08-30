@@ -1,0 +1,2344 @@
+openapi: 3.1.0
+info:
+  title: Forma API
+  version: 1.0.0
+  description: >
+    Cloud API for Forma, the AI personal-trainer product. Backs the React Native
+    app and the web companion. See API.md for conventions, auth flow and examples.
+
+    Conventions:
+      - All paths are prefixed with `/api/v1`.
+      - Every endpoint except `/health` and `/auth/*` needs `Authorization: Bearer <accessToken>`.
+      - Errors always use the envelope `{ "error": { "code", "message", "details?" } }`.
+      - Timestamps are ISO-8601 UTC strings. Weights/heights are metric (kg / cm);
+        the client converts for display using `unitPreference`.
+      - `id` fields are opaque CUID strings.
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local
+  - url: https://api.forma.app/api/v1
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Me
+  - name: Trainer
+  - name: Library
+  - name: Workouts
+  - name: Programs
+  - name: Sessions
+  - name: Body
+  - name: Progress
+  - name: Goals
+  - name: Store
+  - name: Chat
+  - name: Notifications
+  - name: Achievements
+  - name: Subscription
+  - name: Dashboard
+  - name: System
+
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean }, ts: { type: string, format: date-time } }
+
+  # ────────────────────────────────── Auth ──────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an email account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 200 }
+                name: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/AuthSession" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Password login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/AuthSession" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/social/{provider}:
+    post:
+      tags: [Auth]
+      summary: Sign in with Apple / Google
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, enum: [apple, google] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identityToken]
+              properties:
+                identityToken: { type: string, description: "Provider identity JWT" }
+                name: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/AuthSession" }
+        "201": { $ref: "#/components/responses/AuthSession" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties: { refreshToken: { type: string } }
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties: { refreshToken: { type: string } }
+      responses:
+        "204": { description: Revoked }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password-reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties: { email: { type: string, format: email } }
+      responses:
+        "200":
+          description: Always 200 (does not leak whether the address exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean }, devToken: { type: string, description: "non-production only" } }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Complete a password reset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        "200": { description: Password changed; all sessions revoked }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user (compact)
+      responses:
+        "200":
+          description: User with trainer + wallet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  # ────────────────────────────────── Me ────────────────────────────────────
+  /me:
+    get:
+      tags: [Me]
+      summary: Full profile bundle
+      responses:
+        "200":
+          description: User + trainer + wallet + subscription + prefs + injuries + equipment + devices
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserFull" }
+    patch:
+      tags: [Me]
+      summary: Update profile fields
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfilePatch" }
+      responses:
+        "200":
+          description: Updated user
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+    delete:
+      tags: [Me]
+      summary: Delete account (soft, purged after 30 days)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties: { confirm: { type: boolean, enum: [true] } }
+      responses:
+        "204": { description: Account scheduled for deletion }
+
+  /me/onboarding:
+    post:
+      tags: [Me]
+      summary: One-shot onboarding (profile + trainer + equipment + injuries; seeds goals)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ProfilePatch"
+                - type: object
+                  properties:
+                    trainer: { $ref: "#/components/schemas/TrainerPatch" }
+                    equipmentKeys: { type: array, items: { type: string } }
+                    injuries:
+                      type: array
+                      items:
+                        type: object
+                        required: [tag]
+                        properties: { tag: { type: string }, note: { type: string } }
+                    experience:
+                      type: object
+                      description: >
+                        calmMode true → disclosure "on_interaction" + safety exceptions +
+                        reduceMotion + gating kept on. false → defaults + gating off (power users).
+                      properties:
+                        calmMode: { type: boolean }
+                        startTier: { type: string, enum: [starter, building, established, full] }
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /me/settings:
+    get:
+      tags: [Me]
+      summary: Settings bundle — camera (S8) · units (S7) · appearance · disclosure · progression
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/SettingsBundle" } } }
+    put:
+      tags: [Me]
+      summary: Deep-merge patch — any subset of the bundle blocks
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SettingsPatch" } } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/SettingsBundle" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /me/progression:
+    put:
+      tags: [Me]
+      summary: Toggle full-reveal vs ease-in — never resets unlockedFeatures
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gatingEnabled]
+              properties: { gatingEnabled: { type: boolean } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ProgressionResult" } } }
+
+  /me/progression/evaluate:
+    post:
+      tags: [Me]
+      summary: Force a progression re-evaluation
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ProgressionResult" } } }
+
+  /config/appearance-presets:
+    get:
+      tags: [System]
+      summary: Curated background/glass presets the caller may use
+      description: >
+        Auth optional. Anonymous callers get only free, always-available presets;
+        authed callers also get presets at/below their tier and premium themes they own.
+        Cacheable for 5 minutes.
+      security: []
+      responses:
+        "200":
+          headers:
+            Cache-Control: { schema: { type: string }, description: "public, max-age=300" }
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/BackgroundPreset" } }
+
+  /me/export:
+    get:
+      tags: [Me]
+      summary: GDPR data export (JSON attachment)
+      responses:
+        "200":
+          description: Full export
+          content: { application/json: { schema: { type: object } } }
+
+  /me/injuries:
+    get:
+      tags: [Me]
+      summary: List injury notes
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/InjuryNote" } } } }
+    post:
+      tags: [Me]
+      summary: Add an injury note
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag]
+              properties: { tag: { type: string }, note: { type: string } }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/InjuryNote" } } }
+
+  /me/injuries/{id}:
+    delete:
+      tags: [Me]
+      summary: Delete an injury note
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Deleted }
+
+  /me/equipment:
+    get:
+      tags: [Me]
+      summary: Equipment catalogue with ownership flags
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: "#/components/schemas/Equipment"
+                    - type: object
+                      properties: { owned: { type: boolean } }
+    put:
+      tags: [Me]
+      summary: Replace owned equipment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [equipmentKeys]
+              properties: { equipmentKeys: { type: array, items: { type: string } } }
+      responses:
+        "200": { description: "{ ok, count }" }
+
+  /me/devices:
+    get:
+      tags: [Me]
+      summary: Connected devices / health platforms
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/DeviceConnection" } } } }
+
+  /me/devices/{provider}:
+    put:
+      tags: [Me]
+      summary: Connect / disconnect a provider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, example: apple_health }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: { status: { type: string, enum: [connected, disconnected] } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/DeviceConnection" } } }
+
+  # ──────────────────────────────── Trainer ─────────────────────────────────
+  /trainer:
+    get:
+      tags: [Trainer]
+      summary: Trainer configuration
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Trainer" } } }
+    patch:
+      tags: [Trainer]
+      summary: Update trainer (name / avatar / voice / personality dials)
+      requestBody:
+        content: { application/json: { schema: { $ref: "#/components/schemas/TrainerPatch" } } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Trainer" } } }
+
+  /trainer/apply-personality/{storeItemId}:
+    post:
+      tags: [Trainer]
+      summary: Apply an owned personality preset to the sliders
+      parameters:
+        - { name: storeItemId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Trainer" } } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /trainer/insights:
+    get:
+      tags: [Trainer]
+      summary: Coaching insights log (T4)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/CoachingInsight" } } } }
+
+  /trainer/insights/generate:
+    post:
+      tags: [Trainer]
+      summary: Run the insight rules engine now
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/CoachingInsight" } } } }
+
+  /trainer/insights/{id}/dismiss:
+    post:
+      tags: [Trainer]
+      summary: Dismiss an insight
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /trainer/check-in:
+    get:
+      tags: [Trainer]
+      summary: Proactive check-in prompt (T5)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prompt: { type: string }
+                  options: { type: array, items: { type: string } }
+                  topic: { type: string, enum: [injury, soreness, energy] }
+
+  /trainer/check-in/respond:
+    post:
+      tags: [Trainer]
+      summary: Record a check-in answer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [topic, answer]
+              properties: { topic: { type: string }, answer: { type: string } }
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /trainer/catalogue:
+    get:
+      tags: [Trainer]
+      summary: Voice / avatar / theme / personality catalogue with ownership
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  voices: { type: array, items: { $ref: "#/components/schemas/StoreItem" } }
+                  avatars: { type: array, items: { $ref: "#/components/schemas/StoreItem" } }
+                  themes: { type: array, items: { $ref: "#/components/schemas/StoreItem" } }
+                  personalities: { type: array, items: { $ref: "#/components/schemas/StoreItem" } }
+
+  # ──────────────────────────────── Library ─────────────────────────────────
+  /library/muscle-groups:
+    get:
+      tags: [Library]
+      summary: All muscle groups (reference data)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/MuscleGroup" } } } }
+
+  /library/muscle-groups/{key}/exercises:
+    get:
+      tags: [Library]
+      summary: Exercises that train a muscle group (E3 / B5)
+      parameters: [{ name: key, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  muscleGroup: { $ref: "#/components/schemas/MuscleGroup" }
+                  exercises: { type: array, items: { $ref: "#/components/schemas/Exercise" } }
+
+  /library/exercises:
+    get:
+      tags: [Library]
+      summary: Search / filter exercises (E1)
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: muscle, in: query, schema: { type: string }, description: "muscle-group key" }
+        - { name: equipment, in: query, schema: { type: string } }
+        - { name: camera, in: query, schema: { type: string, enum: ["true", "false"] } }
+        - { name: take, in: query, schema: { type: integer, default: 50, maximum: 100 } }
+        - { name: skip, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Exercise" } }
+                  total: { type: integer }
+
+  /library/exercises/{slug}:
+    get:
+      tags: [Library]
+      summary: Exercise detail (E2)
+      parameters: [{ $ref: "#/components/parameters/PathSlug" }]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Exercise"
+                  - type: object
+                    properties:
+                      alternatives:
+                        type: array
+                        items:
+                          type: object
+                          properties: { slug: { type: string }, name: { type: string }, equipment: { type: array, items: { type: string } } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /library/exercises/{slug}/history:
+    get:
+      tags: [Library]
+      summary: The user's logged history for one exercise (E2 personal history card)
+      parameters:
+        - { $ref: "#/components/parameters/PathSlug" }
+        - { name: take, in: query, schema: { type: integer, default: 15, maximum: 50 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exercise: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+                  personalRecords: { type: array, items: { $ref: "#/components/schemas/PersonalRecord" } }
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, format: date-time }
+                        sessionId: { type: string }
+                        formScoreAvg: { type: number, nullable: true }
+                        sets:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              weightKg: { type: number, nullable: true }
+                              reps: { type: integer, nullable: true }
+                              rpe: { type: number, nullable: true }
+                              isPersonalRecord: { type: boolean }
+
+  # ─────────────────────────────── Workouts ─────────────────────────────────
+  /workouts:
+    get:
+      tags: [Workouts]
+      summary: List workouts / templates / scheduled range (W1 / W4 / W12)
+      parameters:
+        - { name: template, in: query, schema: { type: string, enum: ["true", "false"] } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Workout" } } } }
+    post:
+      tags: [Workouts]
+      summary: Create a workout (manual builder W3)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutInput" } } }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Workout" } } }
+
+  /workouts/{id}:
+    get:
+      tags: [Workouts]
+      summary: Workout detail (W6 pre-workout summary)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Workout" } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [Workouts]
+      summary: Update a workout (W15 edit in-progress plan)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutInput" } } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Workout" } } }
+    delete:
+      tags: [Workouts]
+      summary: Delete a workout
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Deleted }
+
+  /workouts/{id}/duplicate:
+    post:
+      tags: [Workouts]
+      summary: Duplicate a workout (save as template / copy to a date)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                asTemplate: { type: boolean }
+                scheduledDate: { type: string, format: date }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Workout" } } }
+
+  /workouts/generate:
+    post:
+      tags: [Workouts]
+      summary: AI Workout Generator (W2) — deterministic rules engine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [focus]
+              properties:
+                focus: { type: array, items: { type: string }, description: "muscle-group keys", minItems: 1 }
+                durationMin: { type: integer, default: 45, minimum: 15, maximum: 120 }
+                equipmentKeys: { type: array, items: { type: string } }
+                difficulty: { type: string, enum: [beginner, intermediate, advanced] }
+                scheduledDate: { type: string, format: date }
+                save: { type: boolean, default: false, description: "true → persists and returns a Workout" }
+      responses:
+        "200":
+          description: Generated plan (save=false)
+          content: { application/json: { schema: { $ref: "#/components/schemas/GeneratedPlan" } } }
+        "201":
+          description: Persisted workout (save=true)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Workout" } } }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /workouts/swap-suggestions:
+    post:
+      tags: [Workouts]
+      summary: Exercise Swap Sheet (W10) — ranked alternatives + reasons
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [exerciseSlug]
+              properties:
+                exerciseSlug: { type: string }
+                reason: { type: string, enum: [equipment_unavailable, pain, preference, too_easy, too_hard] }
+                equipmentKeys: { type: array, items: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  original: { type: object, properties: { slug: { type: string }, name: { type: string } } }
+                  recommended: { type: array, items: { $ref: "#/components/schemas/SwapSuggestion" } }
+                  all: { type: array, items: { $ref: "#/components/schemas/SwapSuggestion" } }
+
+  # ─────────────────────────────── Programs ─────────────────────────────────
+  /programs:
+    get:
+      tags: [Programs]
+      summary: List training programs
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Program" } } } }
+
+  /programs/generate:
+    post:
+      tags: [Programs]
+      summary: Generate a multi-week program (O15 / W5)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                split: { type: string, enum: [full_body, upper_lower, ppl], default: upper_lower }
+                daysPerWeek: { type: integer, minimum: 2, maximum: 6, default: 4 }
+                durationWeeks: { type: integer, minimum: 2, maximum: 16, default: 8 }
+                sessionLengthMin: { type: integer, minimum: 20, maximum: 120, default: 45 }
+                equipmentKeys: { type: array, items: { type: string } }
+                name: { type: string }
+                activate: { type: boolean, default: true }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Program" } } }
+
+  /programs/{id}:
+    get:
+      tags: [Programs]
+      summary: Program detail with days + workouts
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Program" } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Programs]
+      summary: Delete a program
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Deleted }
+
+  /programs/{id}/week/{n}:
+    get:
+      tags: [Programs]
+      summary: One week of a program
+      parameters:
+        - { $ref: "#/components/parameters/PathId" }
+        - { name: n, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ProgramDay" } } } }
+
+  /programs/{id}/activate:
+    post:
+      tags: [Programs]
+      summary: Make this the active program
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /programs/{id}/schedule:
+    post:
+      tags: [Programs]
+      summary: Lay a program week onto calendar dates
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weekIndex, startDate]
+              properties:
+                weekIndex: { type: integer, minimum: 0 }
+                startDate: { type: string, format: date }
+      responses:
+        "201":
+          description: "{ scheduled, workouts[] }"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduled: { type: integer }
+                  workouts: { type: array, items: { $ref: "#/components/schemas/Workout" } }
+
+  # ─────────────────────────────── Sessions ─────────────────────────────────
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: Session history (W13)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [in_progress, completed, abandoned] } }
+        - { name: take, in: query, schema: { type: integer, default: 30, maximum: 100 } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WorkoutSession" } } } }
+    post:
+      tags: [Sessions]
+      summary: Start a session (from a workout or ad hoc)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workoutId: { type: string }
+                name: { type: string }
+                trackingMode: { type: string, enum: [camera, manual], default: manual }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutSession" } } }
+
+  /sessions/{id}:
+    get:
+      tags: [Sessions]
+      summary: Session recap (W11 / W14)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutSession" } } }
+
+  /sessions/{id}/performances:
+    post:
+      tags: [Sessions]
+      summary: Add / replace an exercise mid-session (swap W10)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [exerciseId, order]
+              properties:
+                exerciseId: { type: string }
+                order: { type: integer, minimum: 0 }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ExercisePerformance" } } }
+
+  /sessions/{id}/performances/{perfId}/sets/{setNumber}:
+    put:
+      tags: [Sessions]
+      summary: Log (upsert) a set — the W7 hot path
+      parameters:
+        - { $ref: "#/components/parameters/PathId" }
+        - { name: perfId, in: path, required: true, schema: { type: string } }
+        - { name: setNumber, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                weightKg: { type: number, nullable: true }
+                reps: { type: integer, nullable: true }
+                rpe: { type: number, minimum: 1, maximum: 10, nullable: true }
+                restSecondsTaken: { type: integer }
+                isWarmup: { type: boolean }
+                formScore: { type: number, minimum: 0, maximum: 100, nullable: true }
+                romValue: { type: number, nullable: true }
+                completed: { type: boolean }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ExerciseSet" } } }
+    delete:
+      tags: [Sessions]
+      summary: Remove a set
+      parameters:
+        - { $ref: "#/components/parameters/PathId" }
+        - { name: perfId, in: path, required: true, schema: { type: string } }
+        - { name: setNumber, in: path, required: true, schema: { type: integer } }
+      responses:
+        "204": { description: Deleted }
+
+  /sessions/{id}/form-analysis:
+    post:
+      tags: [Sessions]
+      summary: Ingest per-rep camera form analysis (W8) — categorical only
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [performanceId, setNumber, reps]
+              properties:
+                performanceId: { type: string }
+                setNumber: { type: integer, minimum: 1 }
+                reps:
+                  type: array
+                  items:
+                    type: object
+                    required: [repIndex, jointAngleSnapshot]
+                    properties:
+                      repIndex: { type: integer, minimum: 0 }
+                      jointAngleSnapshot: { type: object, additionalProperties: { type: number } }
+                      romValue: { type: number }
+                      tempoSeconds: { type: number }
+                      detectedFaults:
+                        type: array
+                        items:
+                          type: object
+                          properties: { type: { type: string }, severity: { type: number, minimum: 0, maximum: 1 } }
+                      overallRepScore: { type: number, minimum: 0, maximum: 100 }
+      responses:
+        "201": { description: "{ ok, reps }" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /sessions/{id}/finish:
+    post:
+      tags: [Sessions]
+      summary: >
+        Finish (W11) — recomputes volume, materializes MuscleActivation, detects PRs,
+        writes the trainer comment, fires achievements / insights / notifications.
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durationSeconds: { type: integer }
+                caloriesEstimate: { type: integer }
+      responses:
+        "200":
+          description: Finalized session (with performances, muscleActivations, personalRecords, trainerComment)
+          content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutSession" } } }
+
+  /sessions/{id}/abandon:
+    post:
+      tags: [Sessions]
+      summary: Abandon a session
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/WorkoutSession" } } }
+
+  # ────────────────────────────────── Body ──────────────────────────────────
+  /body/muscle-map:
+    get:
+      tags: [Body]
+      summary: Aggregated muscle activation for the 3D map (B1 / B2)
+      parameters:
+        - { name: range, in: query, schema: { type: string, enum: [today, week, month], default: week } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range: { type: string }
+                  muscles:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        name: { type: string }
+                        region: { type: string }
+                        score: { type: number, description: "0..1" }
+                        role: { type: string, enum: [primary, secondary, stabilizer] }
+
+  /body/balance:
+    get:
+      tags: [Body]
+      summary: Muscle balance / undertrained report (B4)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mostTrained: { type: array, items: { $ref: "#/components/schemas/MuscleLoad" } }
+                  undertrained: { type: array, items: { $ref: "#/components/schemas/MuscleLoad" } }
+
+  /body/muscle/{key}:
+    get:
+      tags: [Body]
+      summary: Muscle detail sheet (B3)
+      parameters:
+        - { name: key, in: path, required: true, schema: { type: string } }
+        - { name: days, in: query, schema: { type: integer, default: 28 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  name: { type: string }
+                  anatomicalName: { type: string }
+                  region: { type: string }
+                  sessionsHit: { type: integer }
+                  totalLoad: { type: number }
+                  activitySeries:
+                    type: array
+                    items: { type: object, properties: { date: { type: string }, score: { type: number } } }
+                  recentExercises: { type: array, items: { type: object } }
+                  allExercises: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  # ───────────────────────────────── Progress ───────────────────────────────
+  /progress/metrics:
+    get:
+      tags: [Progress]
+      summary: Time-series metrics
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: key, in: query, schema: { type: string } }
+        - { name: days, in: query, schema: { type: integer, default: 90 } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ProgressMetric" } } } }
+    post:
+      tags: [Progress]
+      summary: Record a metric
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [metricType, value, unit]
+              properties:
+                metricType: { $ref: "#/components/schemas/ProgressMetricType" }
+                key: { type: string }
+                value: { type: number }
+                unit: { type: string }
+                recordedAt: { type: string, format: date-time }
+                source: { type: string, enum: [manual_entry, health_sync, computed], default: manual_entry }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ProgressMetric" } } }
+
+  /progress/measurements:
+    get:
+      tags: [Progress]
+      summary: Body measurements (P4)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/BodyMeasurement" } } } }
+    post:
+      tags: [Progress]
+      summary: Log a weigh-in / measurement
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/BodyMeasurementInput" } } }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/BodyMeasurement" } } }
+
+  /progress/personal-records:
+    get:
+      tags: [Progress]
+      summary: All-time PR list (P7)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/PersonalRecord" } } } }
+
+  /progress/strength/{slug}:
+    get:
+      tags: [Progress]
+      summary: Per-lift estimated-1RM series (P2)
+      parameters:
+        - { $ref: "#/components/parameters/PathSlug" }
+        - { name: days, in: query, schema: { type: integer, default: 180 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slug: { type: string }
+                  series:
+                    type: array
+                    items: { type: object, properties: { date: { type: string }, e1rm: { type: number } } }
+
+  /progress/overview:
+    get:
+      tags: [Progress]
+      summary: AI progress summary (P1)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary: { type: string }
+                  sessions: { type: integer }
+                  totalVolumeKg: { type: integer }
+                  personalRecords: { type: integer }
+
+  /progress/readiness:
+    get:
+      tags: [Progress]
+      summary: Readiness breakdown (H3)
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/ReadinessBreakdown" } } }
+
+  /progress/consistency:
+    get:
+      tags: [Progress]
+      summary: Volume & consistency detail (P3)
+      parameters:
+        - { name: weeks, in: query, schema: { type: integer, default: 12, maximum: 52 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { type: integer }
+                  currentStreak: { type: integer }
+                  adherence: { type: number }
+                  weeks:
+                    type: array
+                    items:
+                      type: object
+                      properties: { week: { type: string }, sessions: { type: integer }, volumeKg: { type: integer } }
+
+  /progress/form-trends:
+    get:
+      tags: [Progress]
+      summary: Form-score trends (P6)
+      parameters:
+        - { name: slug, in: query, schema: { type: string } }
+        - { name: days, in: query, schema: { type: integer, default: 90 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slug: { type: string, nullable: true }
+                  samples: { type: integer }
+                  series:
+                    type: array
+                    items: { type: object, properties: { date: { type: string }, formScore: { type: number } } }
+
+  /progress/photos:
+    get:
+      tags: [Progress]
+      summary: Progress photo timeline (P5)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ProgressPhoto" } } } }
+    post:
+      tags: [Progress]
+      summary: Register a photo + get a presigned upload target
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                poseTag: { type: string, enum: [front, side, back], default: front }
+                takenAt: { type: string, format: date-time }
+                contentType: { type: string, default: image/jpeg }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  photo: { $ref: "#/components/schemas/ProgressPhoto" }
+                  upload:
+                    type: object
+                    properties:
+                      method: { type: string }
+                      url: { type: string }
+                      headers: { type: object, additionalProperties: { type: string } }
+
+  /progress/photos/{id}:
+    delete:
+      tags: [Progress]
+      summary: Delete a progress photo
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Deleted }
+
+  /progress/photos/compare:
+    get:
+      tags: [Progress]
+      summary: Fetch two photos for compare mode
+      parameters:
+        - { name: a, in: query, required: true, schema: { type: string } }
+        - { name: b, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  a: { $ref: "#/components/schemas/ProgressPhoto" }
+                  b: { $ref: "#/components/schemas/ProgressPhoto" }
+
+  /progress/report:
+    get:
+      tags: [Progress]
+      summary: Full report payload for export (P8)
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 90 } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: object } } }
+
+  # ────────────────────────────────── Goals ─────────────────────────────────
+  /goals:
+    get:
+      tags: [Goals]
+      summary: Goals with current-period progress
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/GoalWithProgress" } } } }
+    post:
+      tags: [Goals]
+      summary: Create / update a goal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, label, target, unit, cadence]
+              properties:
+                key: { type: string }
+                label: { type: string }
+                target: { type: number }
+                unit: { type: string }
+                cadence: { type: string, enum: [daily, weekly] }
+                tone: { type: string, default: pink }
+      responses:
+        "201":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Goal" } } }
+
+  /goals/{id}/log:
+    post:
+      tags: [Goals]
+      summary: Log progress toward a goal for the current period
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: number }
+                mode: { type: string, enum: [set, increment], default: set }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/GoalWithProgress" } } }
+
+  /goals/{id}:
+    delete:
+      tags: [Goals]
+      summary: Archive a goal
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Archived }
+
+  # ────────────────────────────────── Store ─────────────────────────────────
+  /store/wallet:
+    get:
+      tags: [Store]
+      summary: Coin balance + recent transactions
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balance: { type: integer }
+                  earnedThisWeek: { type: integer }
+                  recent: { type: array, items: { $ref: "#/components/schemas/WalletTransaction" } }
+
+  /store/wallet/earn:
+    post:
+      tags: [Store]
+      summary: Award coins (also fired automatically by achievements)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, label]
+              properties:
+                amount: { type: integer, minimum: 1, maximum: 1000 }
+                label: { type: string }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
+
+  /store/items:
+    get:
+      tags: [Store]
+      summary: Store catalogue with ownership / equipped flags
+      parameters:
+        - { name: category, in: query, schema: { type: string, enum: [voice, personality, look, theme] } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: "#/components/schemas/StoreItem"
+                    - type: object
+                      properties: { owned: { type: boolean }, equipped: { type: boolean } }
+
+  /store/items/{id}/buy:
+    post:
+      tags: [Store]
+      summary: Buy an item with coins
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "201":
+          description: "{ item, balance }"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /store/items/{id}/equip:
+    post:
+      tags: [Store]
+      summary: Equip an owned item (one per category; reflects onto the trainer)
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "{ ok: true }" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  # ────────────────────────────────── Chat ──────────────────────────────────
+  /chat:
+    get:
+      tags: [Chat]
+      summary: Message history (oldest→newest)
+      parameters:
+        - { name: take, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: before, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ChatMessage" } } } }
+    post:
+      tags: [Chat]
+      summary: Send a message; returns the user + trainer messages
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties: { content: { type: string, minLength: 1, maxLength: 4000 } }
+      responses:
+        "201": { $ref: "#/components/responses/ChatTurn" }
+    delete:
+      tags: [Chat]
+      summary: Clear chat history
+      responses:
+        "204": { description: Cleared }
+
+  /chat/voice:
+    post:
+      tags: [Chat]
+      summary: Voice-mode turn (client does STT/TTS, sends transcript) (T3)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transcript]
+              properties: { transcript: { type: string } }
+      responses:
+        "201": { $ref: "#/components/responses/ChatTurn" }
+
+  /chat/messages/{id}/apply:
+    post:
+      tags: [Chat]
+      summary: Apply an ApplyAction card embedded in a trainer message
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "{ ok, result }" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /chat/suggested-prompts:
+    get:
+      tags: [Chat]
+      summary: Context-aware suggested prompts (T1)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { type: string } } } }
+
+  # ─────────────────────────────── Notifications ────────────────────────────
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Notifications center (H2)
+      parameters:
+        - { name: unread, in: query, schema: { type: string, enum: ["true", "false"] } }
+        - { name: take, in: query, schema: { type: integer, default: 50, maximum: 100 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+                  unreadCount: { type: integer }
+
+  /notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      summary: Mark one notification read
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark all read
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  /notifications/{id}:
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification
+      parameters: [{ $ref: "#/components/parameters/PathId" }]
+      responses:
+        "204": { description: Deleted }
+
+  /notifications/preferences:
+    get:
+      tags: [Notifications]
+      summary: Notification preferences (S6)
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/NotificationPreference" } } }
+    put:
+      tags: [Notifications]
+      summary: Update notification preferences
+      requestBody:
+        content: { application/json: { schema: { $ref: "#/components/schemas/NotificationPreference" } } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/NotificationPreference" } } }
+
+  # ─────────────────────────────── Achievements ─────────────────────────────
+  /achievements:
+    get:
+      tags: [Achievements]
+      summary: Achievements with per-user progress (Progress AchievementStrip)
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AchievementProgress" } } } }
+
+  /achievements/evaluate:
+    post:
+      tags: [Achievements]
+      summary: Force a re-evaluation
+      responses:
+        "200": { description: "{ ok: true }" }
+
+  # ─────────────────────────────── Subscription ─────────────────────────────
+  /subscription/plans:
+    get:
+      tags: [Subscription]
+      summary: Available plans
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Plan" } } } }
+
+  /subscription:
+    get:
+      tags: [Subscription]
+      summary: Current subscription + entitlement
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Subscription"
+                  - type: object
+                    properties:
+                      entitled: { type: boolean }
+                      plans: { type: array, items: { $ref: "#/components/schemas/Plan" } }
+
+  /subscription/validate-receipt:
+    post:
+      tags: [Subscription]
+      summary: Validate an App Store / Play Store receipt (stub)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [store, receipt, plan]
+              properties:
+                store: { type: string, enum: [app_store, play_store] }
+                receipt: { type: string }
+                plan: { type: string, enum: [pro_monthly, pro_annual] }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } }
+
+  /subscription/cancel:
+    post:
+      tags: [Subscription]
+      summary: Cancel the subscription
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Subscription" } } }
+
+  # ─────────────────────────────── Dashboard ────────────────────────────────
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Home dashboard aggregate (H1)
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/Dashboard" } } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    PathSlug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: Error envelope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AuthSession:
+      description: User + token pair
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              user: { $ref: "#/components/schemas/User" }
+              accessToken: { type: string }
+              refreshToken: { type: string }
+    ChatTurn:
+      description: The persisted user message and the trainer reply
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              userMessage: { $ref: "#/components/schemas/ChatMessage" }
+              trainerMessage: { $ref: "#/components/schemas/ChatMessage" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              description: "present on validation errors (zod flatten output)"
+              type: object
+              additionalProperties: true
+
+    Tokens:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+
+    ProfilePatch:
+      type: object
+      properties:
+        name: { type: string }
+        dateOfBirth: { type: string, format: date-time }
+        biologicalSex: { type: string, enum: [male, female, other, prefer_not_to_say] }
+        heightCm: { type: number }
+        weightKg: { type: number }
+        unitPreference: { type: string, enum: [metric, imperial] }
+        weekStartsMonday: { type: boolean }
+        fitnessGoal: { type: string, enum: [build_muscle, lose_fat, get_stronger, general_fitness, athletic_performance, maintain] }
+        experienceLevel: { type: string, enum: [beginner, intermediate, advanced] }
+        trainingLocation: { type: string, enum: [gym, home, both] }
+        trainingFrequencyTarget: { type: integer, minimum: 1, maximum: 7 }
+        sessionLengthTargetMin: { type: integer }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        authProvider: { type: string, enum: [email, apple, google] }
+        unitPreference: { type: string, enum: [metric, imperial] }
+        weekStartsMonday: { type: boolean }
+        dateOfBirth: { type: string, format: date-time, nullable: true }
+        biologicalSex: { type: string, nullable: true }
+        heightCm: { type: number, nullable: true }
+        weightKg: { type: number, nullable: true }
+        fitnessGoal: { type: string, nullable: true }
+        experienceLevel: { type: string, nullable: true }
+        trainingLocation: { type: string, nullable: true }
+        trainingFrequencyTarget: { type: integer, nullable: true }
+        sessionLengthTargetMin: { type: integer, nullable: true }
+        onboardingCompletedAt: { type: string, format: date-time, nullable: true }
+        formDataVerbosity: { type: string, enum: [minimal, categorical, detailed] }
+        saveHighlightClips: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        trainer: { $ref: "#/components/schemas/Trainer" }
+        wallet: { $ref: "#/components/schemas/Wallet" }
+
+    UserFull:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            subscription: { $ref: "#/components/schemas/Subscription" }
+            notificationPrefs: { $ref: "#/components/schemas/NotificationPreference" }
+            injuries: { type: array, items: { $ref: "#/components/schemas/InjuryNote" } }
+            equipment: { type: array, items: { type: object } }
+            deviceConnections: { type: array, items: { $ref: "#/components/schemas/DeviceConnection" } }
+
+    CameraSettings:
+      type: object
+      properties:
+        formDataVerbosity: { type: string, enum: [minimal, categorical, detailed] }
+        saveHighlightClips: { type: boolean }
+
+    UnitSettings:
+      type: object
+      properties:
+        unitPreference: { type: string, enum: [metric, imperial] }
+        weekStartsMonday: { type: boolean }
+
+    BackgroundGradient:
+      type: object
+      properties:
+        angle: { type: number }
+        stops:
+          type: array
+          items:
+            type: object
+            properties: { color: { type: string }, at: { type: number } }
+
+    GlassSettings:
+      type: object
+      properties:
+        opacity: { type: number, description: "clamped 0.35..0.95" }
+        blurPx: { type: integer, description: "clamped 0..40" }
+        tint: { type: string, description: "#RRGGBB(AA)" }
+
+    AppearanceSettings:
+      description: preset defaults → user overrides, already merged
+      type: object
+      properties:
+        presetId: { type: string, nullable: true, description: "null once hand-edited" }
+        backgroundMode: { type: string, enum: [solid, gradient, image] }
+        backgroundColor: { type: string }
+        backgroundGradient: { $ref: "#/components/schemas/BackgroundGradient", nullable: true }
+        backgroundImageUrl: { type: string, nullable: true }
+        backgroundDim: { type: number, description: "0..1 scrim over image/gradient" }
+        glass: { $ref: "#/components/schemas/GlassSettings" }
+        accentColor: { type: string, description: "resolved — brand #D51A7A when unset" }
+        reduceMotion: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+
+    DisclosureSettings:
+      type: object
+      properties:
+        mode: { type: string, enum: [always, on_interaction] }
+        widgetOverrides:
+          type: object
+          additionalProperties: { type: string, enum: [always, on_interaction] }
+          description: "effective visibility = widgetOverrides[key] ?? mode"
+
+    NextUnlock:
+      type: object
+      nullable: true
+      properties:
+        feature: { type: string }
+        requirement: { type: string }
+        progress:
+          type: object
+          properties: { current: { type: number }, target: { type: number } }
+
+    ProgressionState:
+      type: object
+      properties:
+        tier: { type: string, enum: [starter, building, established, full] }
+        unlockedFeatures: { type: array, items: { type: string } }
+        gatingEnabled: { type: boolean }
+        nextUnlock: { $ref: "#/components/schemas/NextUnlock" }
+
+    ProgressionResult:
+      allOf:
+        - $ref: "#/components/schemas/ProgressionState"
+        - type: object
+          properties:
+            newlyUnlocked: { type: array, items: { type: string } }
+
+    SettingsBundle:
+      type: object
+      properties:
+        camera: { $ref: "#/components/schemas/CameraSettings" }
+        units: { $ref: "#/components/schemas/UnitSettings" }
+        appearance: { $ref: "#/components/schemas/AppearanceSettings" }
+        disclosure: { $ref: "#/components/schemas/DisclosureSettings" }
+        progression: { $ref: "#/components/schemas/ProgressionState" }
+
+    SettingsPatch:
+      description: any subset — deep-merged, each block validated independently
+      type: object
+      properties:
+        camera: { $ref: "#/components/schemas/CameraSettings" }
+        units: { $ref: "#/components/schemas/UnitSettings" }
+        appearance:
+          type: object
+          properties:
+            presetId: { type: string, nullable: true }
+            backgroundMode: { type: string, enum: [solid, gradient, image] }
+            backgroundColor: { type: string }
+            backgroundGradient: { $ref: "#/components/schemas/BackgroundGradient", nullable: true }
+            backgroundImageUrl: { type: string, nullable: true, description: "https + allowlisted host" }
+            backgroundDim: { type: number }
+            glass: { $ref: "#/components/schemas/GlassSettings" }
+            accentColor: { type: string, nullable: true }
+            reduceMotion: { type: boolean }
+        disclosure:
+          type: object
+          properties:
+            mode: { type: string, enum: [always, on_interaction] }
+            widgetOverrides:
+              type: object
+              additionalProperties: { type: string, enum: [always, on_interaction] }
+
+    BackgroundPreset:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        mode: { type: string, enum: [solid, gradient, image] }
+        backgroundColor: { type: string, nullable: true }
+        gradient: { $ref: "#/components/schemas/BackgroundGradient", nullable: true }
+        imageUrl: { type: string, nullable: true }
+        backgroundDim: { type: number }
+        glass: { $ref: "#/components/schemas/GlassSettings" }
+        accentColor: { type: string, nullable: true }
+        isDefault: { type: boolean }
+        premium: { type: boolean, description: "unlock requires owning the matching theme StoreItem" }
+
+    InjuryNote:
+      type: object
+      properties:
+        id: { type: string }
+        tag: { type: string }
+        note: { type: string, nullable: true }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    Equipment:
+      type: object
+      properties:
+        id: { type: string }
+        key: { type: string }
+        name: { type: string }
+        icon: { type: string, nullable: true }
+
+    DeviceConnection:
+      type: object
+      properties:
+        id: { type: string }
+        provider: { type: string, example: apple_health }
+        status: { type: string }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+
+    Trainer:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        avatarId: { type: string }
+        voiceId: { type: string }
+        equippedThemeId: { type: string }
+        motivationLevel: { type: number }
+        coachingDirectness: { type: number }
+        formStrictness: { type: number }
+        speakingFrequency: { type: number }
+        coachingDetail: { type: number }
+        humor: { type: number }
+
+    TrainerPatch:
+      type: object
+      properties:
+        name: { type: string }
+        avatarId: { type: string }
+        voiceId: { type: string }
+        equippedThemeId: { type: string }
+        motivationLevel: { type: number, minimum: 0, maximum: 1 }
+        coachingDirectness: { type: number, minimum: 0, maximum: 1 }
+        formStrictness: { type: number, minimum: 0, maximum: 1 }
+        speakingFrequency: { type: number, minimum: 0, maximum: 1 }
+        coachingDetail: { type: number, minimum: 0, maximum: 1 }
+        humor: { type: number, minimum: 0, maximum: 1 }
+
+    MuscleGroup:
+      type: object
+      properties:
+        id: { type: string }
+        key: { type: string }
+        name: { type: string }
+        plainName: { type: string }
+        region: { type: string, enum: [upper, lower, core] }
+        meshRegionId: { type: string, nullable: true }
+        parentGroupId: { type: string, nullable: true }
+
+    Exercise:
+      type: object
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        name: { type: string }
+        aliases: { type: array, items: { type: string } }
+        category: { type: string }
+        movementPattern: { type: string, nullable: true }
+        equipment: { type: array, items: { type: string } }
+        difficulty: { type: string, enum: [beginner, intermediate, advanced] }
+        instructions: { type: array, items: { type: string } }
+        commonMistakes: { type: array, items: { type: string } }
+        aiFormTips: { type: array, items: { type: string } }
+        videoAssetRef: { type: string, nullable: true }
+        supportsCameraTracking: { type: boolean }
+        alternativeSlugs: { type: array, items: { type: string } }
+        muscles:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string, enum: [primary, secondary, stabilizer] }
+              weight: { type: number }
+              muscleGroup: { $ref: "#/components/schemas/MuscleGroup" }
+
+    WorkoutExercise:
+      type: object
+      properties:
+        id: { type: string }
+        exerciseId: { type: string }
+        order: { type: integer }
+        targetSets: { type: integer }
+        targetRepsMin: { type: integer, nullable: true }
+        targetRepsMax: { type: integer, nullable: true }
+        targetWeightKg: { type: number, nullable: true }
+        targetRestSec: { type: integer, nullable: true }
+        notes: { type: string, nullable: true }
+        supersetGroup: { type: integer, nullable: true }
+        supersetType: { type: string, enum: [straight, superset, circuit] }
+        exercise: { $ref: "#/components/schemas/Exercise" }
+
+    WorkoutInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        source: { type: string, enum: [ai_generated, manual, template, program], default: manual }
+        isTemplate: { type: boolean, default: false }
+        scheduledDate: { type: string, format: date-time }
+        estimatedDurationMin: { type: integer }
+        targetMuscleKeys: { type: array, items: { type: string } }
+        notes: { type: string }
+        exercises:
+          type: array
+          items:
+            type: object
+            required: [exerciseId, order, targetSets]
+            properties:
+              exerciseId: { type: string }
+              order: { type: integer }
+              targetSets: { type: integer }
+              targetRepsMin: { type: integer }
+              targetRepsMax: { type: integer }
+              targetWeightKg: { type: number }
+              targetRestSec: { type: integer }
+              notes: { type: string }
+
+    Workout:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        name: { type: string }
+        source: { type: string, enum: [ai_generated, manual, template, program] }
+        isTemplate: { type: boolean }
+        scheduledDate: { type: string, format: date-time, nullable: true }
+        estimatedDurationMin: { type: integer, nullable: true }
+        targetMuscleKeys: { type: array, items: { type: string } }
+        notes: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        exercises: { type: array, items: { $ref: "#/components/schemas/WorkoutExercise" } }
+
+    GeneratedPlan:
+      type: object
+      properties:
+        name: { type: string }
+        estimatedDurationMin: { type: integer }
+        exercises:
+          type: array
+          items:
+            type: object
+            properties:
+              exerciseId: { type: string }
+              slug: { type: string }
+              name: { type: string }
+              sets: { type: integer }
+              repsMin: { type: integer }
+              repsMax: { type: integer }
+              restSec: { type: integer }
+
+    SwapSuggestion:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        equipment: { type: array, items: { type: string } }
+        difficulty: { type: string }
+        reasons: { type: array, items: { type: string } }
+        score: { type: number }
+
+    Program:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        structureType: { type: string, enum: [linear, undulating, split_defined] }
+        durationWeeks: { type: integer }
+        generatedBy: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        days: { type: array, items: { $ref: "#/components/schemas/ProgramDay" } }
+
+    ProgramDay:
+      type: object
+      properties:
+        id: { type: string }
+        weekIndex: { type: integer }
+        dayIndex: { type: integer }
+        label: { type: string, nullable: true }
+        workoutId: { type: string, nullable: true }
+        workout: { $ref: "#/components/schemas/Workout" }
+
+    WorkoutSession:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        workoutId: { type: string, nullable: true }
+        name: { type: string }
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time, nullable: true }
+        status: { type: string, enum: [in_progress, completed, abandoned] }
+        trackingMode: { type: string, enum: [camera, manual] }
+        totalVolumeKg: { type: number }
+        durationSeconds: { type: integer }
+        caloriesEstimate: { type: integer, nullable: true }
+        trainerComment: { type: string, nullable: true }
+        performances: { type: array, items: { $ref: "#/components/schemas/ExercisePerformance" } }
+        muscleActivations: { type: array, items: { $ref: "#/components/schemas/MuscleActivation" } }
+        personalRecords: { type: array, items: { $ref: "#/components/schemas/PersonalRecord" } }
+
+    ExercisePerformance:
+      type: object
+      properties:
+        id: { type: string }
+        exerciseId: { type: string }
+        order: { type: integer }
+        formScoreAvg: { type: number, nullable: true }
+        romAvg: { type: number, nullable: true }
+        supersetGroup: { type: integer, nullable: true }
+        exercise: { $ref: "#/components/schemas/Exercise" }
+        sets: { type: array, items: { $ref: "#/components/schemas/ExerciseSet" } }
+
+    ExerciseSet:
+      type: object
+      properties:
+        id: { type: string }
+        setNumber: { type: integer }
+        weightKg: { type: number, nullable: true }
+        reps: { type: integer, nullable: true }
+        rpe: { type: number, nullable: true }
+        restSecondsTaken: { type: integer, nullable: true }
+        isWarmup: { type: boolean }
+        completedAt: { type: string, format: date-time, nullable: true }
+        formScore: { type: number, nullable: true }
+        romValue: { type: number, nullable: true }
+        isPersonalRecord: { type: boolean }
+
+    MuscleActivation:
+      type: object
+      properties:
+        id: { type: string }
+        muscleGroupId: { type: string }
+        role: { type: string, enum: [primary, secondary, stabilizer] }
+        activationScore: { type: number, description: "0..1" }
+        muscleGroup: { $ref: "#/components/schemas/MuscleGroup" }
+
+    MuscleLoad:
+      type: object
+      properties:
+        key: { type: string }
+        name: { type: string }
+        region: { type: string }
+        load: { type: number }
+
+    PersonalRecord:
+      type: object
+      properties:
+        id: { type: string }
+        exerciseId: { type: string }
+        recordType: { type: string, enum: [max_weight, max_1rm_estimate, max_reps, max_volume] }
+        value: { type: number }
+        previousValue: { type: number, nullable: true }
+        achievedAt: { type: string, format: date-time }
+        exercise: { $ref: "#/components/schemas/Exercise" }
+
+    ProgressMetricType:
+      type: string
+      enum: [bodyweight, measurement, form_score_aggregate, volume_aggregate, readiness, sleep, hrv, resting_hr, steps, protein, calories]
+
+    ProgressMetric:
+      type: object
+      properties:
+        id: { type: string }
+        metricType: { $ref: "#/components/schemas/ProgressMetricType" }
+        key: { type: string, nullable: true }
+        value: { type: number }
+        unit: { type: string }
+        recordedAt: { type: string, format: date-time }
+        source: { type: string, enum: [manual_entry, health_sync, computed] }
+
+    BodyMeasurementInput:
+      type: object
+      properties:
+        weightKg: { type: number }
+        bodyFatPct: { type: number }
+        chestCm: { type: number }
+        waistCm: { type: number }
+        hipsCm: { type: number }
+        thighCm: { type: number }
+        armCm: { type: number }
+        recordedAt: { type: string, format: date-time }
+
+    BodyMeasurement:
+      allOf:
+        - $ref: "#/components/schemas/BodyMeasurementInput"
+        - type: object
+          properties: { id: { type: string } }
+
+    ProgressPhoto:
+      type: object
+      properties:
+        id: { type: string }
+        assetRef: { type: string }
+        poseTag: { type: string, enum: [front, side, back] }
+        takenAt: { type: string, format: date-time }
+
+    ReadinessBreakdown:
+      type: object
+      properties:
+        score: { type: integer }
+        recommendation: { type: string }
+        factors:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              value: { type: string }
+              fraction: { type: number, description: "0..1" }
+
+    ChatMessage:
+      type: object
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [user, trainer] }
+        content: { type: string }
+        richContent: { type: object, nullable: true, additionalProperties: true }
+        viaVoice: { type: boolean }
+        trainerSnapshot: { type: object, nullable: true, additionalProperties: true }
+        appliedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    CoachingInsight:
+      type: object
+      properties:
+        id: { type: string }
+        category: { type: string, enum: [recovery, volume, form, consistency, nutrition, strength] }
+        title: { type: string }
+        body: { type: string }
+        actions: { type: array, items: { type: string } }
+        dataRefs: { type: object, nullable: true, additionalProperties: true }
+        sparkline: { type: array, nullable: true, items: { type: number } }
+        proactive: { type: boolean }
+        dismissedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    Goal:
+      type: object
+      properties:
+        id: { type: string }
+        key: { type: string }
+        label: { type: string }
+        target: { type: number }
+        unit: { type: string }
+        cadence: { type: string, enum: [daily, weekly] }
+        tone: { type: string }
+        active: { type: boolean }
+
+    GoalWithProgress:
+      allOf:
+        - $ref: "#/components/schemas/Goal"
+        - type: object
+          properties:
+            current: { type: number }
+            completed: { type: boolean }
+            periodKey: { type: string }
+
+    AchievementProgress:
+      type: object
+      properties:
+        key: { type: string }
+        title: { type: string }
+        detail: { type: string }
+        icon: { type: string }
+        targetValue: { type: number, nullable: true }
+        progress: { type: number, description: "0..1" }
+        unlockedAt: { type: string, format: date-time, nullable: true }
+
+    Wallet:
+      type: object
+      properties:
+        id: { type: string }
+        balance: { type: integer }
+
+    WalletTransaction:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [earn, spend] }
+        amount: { type: integer }
+        label: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    StoreItem:
+      type: object
+      properties:
+        id: { type: string }
+        category: { type: string, enum: [voice, personality, look, theme] }
+        name: { type: string }
+        detail: { type: string }
+        price: { type: integer }
+        swatch: { type: string, nullable: true }
+        isDefault: { type: boolean }
+        style:
+          type: object
+          nullable: true
+          properties:
+            directness: { type: number }
+            warmth: { type: number }
+            detail: { type: number }
+            intensity: { type: number }
+            humor: { type: number }
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [trainer_message, reminder, milestone, pr, check_in, weekly_summary] }
+        title: { type: string }
+        body: { type: string }
+        deepLink: { type: string, nullable: true }
+        readAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    NotificationPreference:
+      type: object
+      properties:
+        workoutReminders: { type: boolean }
+        restTimerAlerts: { type: boolean }
+        trainerMessages: { type: boolean }
+        milestones: { type: boolean }
+        weeklySummary: { type: boolean }
+        checkIns: { type: boolean }
+        reminderTime: { type: string, example: "18:00" }
+        quietHoursStart: { type: string, nullable: true }
+        quietHoursEnd: { type: string, nullable: true }
+
+    Subscription:
+      type: object
+      properties:
+        plan: { type: string, example: pro_monthly }
+        status: { type: string, enum: [active, inactive, grace, cancelled] }
+        store: { type: string, nullable: true, enum: [app_store, play_store] }
+        currentPeriodEnd: { type: string, format: date-time, nullable: true }
+
+    Plan:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        price: { type: number }
+        interval: { type: string, nullable: true }
+        features: { type: array, items: { type: string } }
+
+    Dashboard:
+      type: object
+      properties:
+        greeting: { type: string }
+        user: { type: object, properties: { name: { type: string } } }
+        trainerName: { type: string }
+        trainerMessage: { type: string }
+        todayWorkout: { $ref: "#/components/schemas/WorkoutSummary", nullable: true }
+        upcomingWorkout: { $ref: "#/components/schemas/WorkoutSummary", nullable: true }
+        activeSessionId: { type: string, nullable: true }
+        weeklyRing: { type: object, properties: { done: { type: integer }, target: { type: integer } } }
+        weeklyVolumeKg: { type: integer }
+        readiness: { type: integer }
+        streakDays: { type: integer }
+        recentPRs:
+          type: array
+          items:
+            type: object
+            properties:
+              lift: { type: string }
+              recordType: { type: string }
+              value: { type: number }
+              previousValue: { type: number, nullable: true }
+        goals: { type: array, items: { $ref: "#/components/schemas/Goal" } }
+        notificationsUnread: { type: integer }
+        insights: { type: array, items: { $ref: "#/components/schemas/CoachingInsight" } }
+
+    WorkoutSummary:
+      type: object
+      properties:
+        name: { type: string }
+        durationMin: { type: integer, nullable: true }
+        exercises: { type: integer }
+        muscles: { type: array, items: { type: string } }

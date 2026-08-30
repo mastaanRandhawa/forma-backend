@@ -1,0 +1,871 @@
+// Forma — AI Personal Trainer · backend data model
+// Mirrors §21 of forma-product-design-spec.md, plus the web companion's
+// goals / wallet / store / achievements surfaces (frontend/src/lib/data.ts).
+//
+// Notes:
+//  - The mobile client is local-first (SQLite on device). This schema is the
+//    cloud sync store + system of record for cross-device data and the AI layer.
+//  - Raw camera frames / raw per-frame pose data are NEVER stored here. Only
+//    categorical form scores + fault labels + key joint-angle snapshots.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum AuthProvider {
+  email
+  apple
+  google
+}
+
+enum UnitPreference {
+  metric
+  imperial
+}
+
+enum FitnessGoal {
+  build_muscle
+  lose_fat
+  get_stronger
+  general_fitness
+  athletic_performance
+  maintain
+}
+
+enum ExperienceLevel {
+  beginner
+  intermediate
+  advanced
+}
+
+enum TrainingLocation {
+  gym
+  home
+  both
+}
+
+enum MuscleRegion {
+  upper
+  lower
+  core
+}
+
+enum MuscleRole {
+  primary
+  secondary
+  stabilizer
+}
+
+enum WorkoutSource {
+  ai_generated
+  manual
+  template
+  program
+}
+
+enum ProgramStructure {
+  linear
+  undulating
+  split_defined
+}
+
+enum SessionStatus {
+  in_progress
+  completed
+  abandoned
+}
+
+enum TrackingMode {
+  camera
+  manual
+}
+
+enum PersonalRecordType {
+  max_weight
+  max_1rm_estimate
+  max_reps
+  max_volume
+}
+
+enum ProgressMetricType {
+  bodyweight
+  measurement
+  form_score_aggregate
+  volume_aggregate
+  readiness
+  sleep
+  hrv
+  resting_hr
+  steps
+  protein
+  calories
+}
+
+enum ProgressMetricSource {
+  manual_entry
+  health_sync
+  computed
+}
+
+enum PhotoPose {
+  front
+  side
+  back
+}
+
+enum ChatRole {
+  user
+  trainer
+}
+
+enum GoalCadence {
+  daily
+  weekly
+}
+
+enum StoreCategory {
+  voice
+  personality
+  look
+  theme
+}
+
+enum WalletTxnType {
+  earn
+  spend
+}
+
+enum FormDataVerbosity {
+  minimal // only aggregate form score
+  categorical // + fault type labels (default, per §22.4)
+  detailed // + key joint-angle snapshots
+}
+
+enum InsightCategory {
+  recovery
+  volume
+  form
+  consistency
+  nutrition
+  strength
+}
+
+enum SupersetType {
+  straight
+  superset
+  circuit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Account / identity
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id        String  @id @default(cuid())
+  email     String  @unique
+  name      String
+
+  authProvider   AuthProvider @default(email)
+  passwordHash   String? // null for social-only accounts
+  appleSub       String?      @unique
+  googleSub      String?      @unique
+
+  dateOfBirth              DateTime?
+  biologicalSex            String? // "male" | "female" | "other" | "prefer_not_to_say"
+  heightCm                 Float?
+  weightKg                 Float? // denormalized from latest BodyMeasurement
+  unitPreference           UnitPreference   @default(metric)
+  weekStartsMonday         Boolean          @default(true)
+
+  fitnessGoal              FitnessGoal?
+  experienceLevel          ExperienceLevel?
+  trainingLocation         TrainingLocation?
+  trainingFrequencyTarget  Int? // days per week
+  sessionLengthTargetMin   Int?
+
+  onboardingCompletedAt    DateTime?
+
+  // Camera & privacy settings (S8) — §22.4 configurable verbosity
+  formDataVerbosity  FormDataVerbosity @default(categorical)
+  saveHighlightClips Boolean           @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft-delete for account removal
+
+  trainer             Trainer?
+  refreshTokens       RefreshToken[]
+  passwordResets      PasswordReset[]
+  injuries            InjuryNote[]
+  equipment           UserEquipment[]
+  workouts            Workout[]
+  programs            TrainingProgram[]
+  sessions            WorkoutSession[]
+  personalRecords     PersonalRecord[]
+  progressMetrics     ProgressMetric[]
+  progressPhotos      ProgressPhoto[]
+  bodyMeasurements    BodyMeasurement[]
+  chatMessages        ChatMessage[]
+  coachingInsights    CoachingInsight[]
+  goals               Goal[]
+  achievements        UserAchievement[]
+  wallet              Wallet?
+  ownedStoreItems     UserStoreItem[]
+  notifications       Notification[]
+  notificationPrefs   NotificationPreference?
+  subscription        Subscription?
+  deviceConnections   DeviceConnection[]
+  appearance          UserAppearance?
+  disclosure          UserDisclosure?
+  progression         UserProgression?
+
+  @@index([createdAt])
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  @@index([userId])
+}
+
+model InjuryNote {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tag       String // e.g. "left shoulder", "lower back"
+  note      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model UserEquipment {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  equipmentId String
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  @@unique([userId, equipmentId])
+}
+
+model Equipment {
+  id    String @id @default(cuid())
+  key   String @unique // "barbell", "dumbbell", "cable", "bodyweight", ...
+  name  String
+  icon  String?
+
+  users     UserEquipment[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI Trainer configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Trainer {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name     String  @default("Kai")
+  avatarId String  @default("l-signature")
+  voiceId  String  @default("v-marcus")
+
+  // §10.3 personality dimensions (0..1)
+  motivationLevel    Float @default(0.6)
+  coachingDirectness Float @default(0.6)
+  formStrictness     Float @default(0.7)
+  speakingFrequency  Float @default(0.5)
+  coachingDetail     Float @default(0.6)
+  humor              Float @default(0.3)
+
+  equippedThemeId String @default("t-default")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reference data — exercise library & muscle groups (shared, not per-user)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MuscleGroup {
+  id             String       @id @default(cuid())
+  key            String       @unique // "chest", "quads", "lats", ...
+  name           String // anatomical
+  plainName      String // plain-language
+  region         MuscleRegion
+  meshRegionId   String? // maps to the 3D model's segmented mesh region
+  parentGroupId  String?
+  parentGroup    MuscleGroup?  @relation("MuscleHierarchy", fields: [parentGroupId], references: [id])
+  children       MuscleGroup[] @relation("MuscleHierarchy")
+
+  exerciseLinks     ExerciseMuscle[]
+  muscleActivations MuscleActivation[]
+}
+
+model Exercise {
+  id                  String   @id @default(cuid())
+  slug                String   @unique
+  name                String
+  aliases             String[] @default([])
+  category            String // "push", "pull", "legs", "core", "olympic", ...
+  movementPattern     String? // "horizontal_press", "squat", "hinge", ...
+  equipment           String[] @default([])
+  difficulty          ExperienceLevel @default(intermediate)
+  instructions        String[] @default([])
+  commonMistakes      String[] @default([])
+  aiFormTips          String[] @default([])
+  videoAssetRef       String?
+  supportsCameraTracking Boolean @default(false)
+  alternativeSlugs    String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  muscles          ExerciseMuscle[]
+  workoutExercises WorkoutExercise[]
+  performances     ExercisePerformance[]
+  personalRecords  PersonalRecord[]
+
+  @@index([category])
+}
+
+model ExerciseMuscle {
+  id            String      @id @default(cuid())
+  exerciseId    String
+  exercise      Exercise    @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  muscleGroupId String
+  muscleGroup   MuscleGroup @relation(fields: [muscleGroupId], references: [id], onDelete: Cascade)
+  role          MuscleRole
+  weight        Float       @default(1.0) // contribution weight for activation math
+
+  @@unique([exerciseId, muscleGroupId, role])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Planning — what was planned
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TrainingProgram {
+  id            String           @id @default(cuid())
+  userId        String
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  structureType ProgramStructure @default(split_defined)
+  durationWeeks Int
+  generatedBy   WorkoutSource    @default(ai_generated)
+  active        Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+
+  days ProgramDay[]
+
+  @@index([userId])
+}
+
+model ProgramDay {
+  id        String          @id @default(cuid())
+  programId String
+  program   TrainingProgram @relation(fields: [programId], references: [id], onDelete: Cascade)
+  weekIndex Int
+  dayIndex  Int
+  label     String? // "Push A", "Rest", ...
+  workoutId String?
+  workout   Workout? @relation(fields: [workoutId], references: [id])
+
+  @@unique([programId, weekIndex, dayIndex])
+}
+
+model Workout {
+  id                     String        @id @default(cuid())
+  userId                 String
+  user                   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                   String
+  source                 WorkoutSource @default(manual)
+  isTemplate             Boolean       @default(false)
+  scheduledDate          DateTime?
+  estimatedDurationMin   Int?
+  targetMuscleKeys       String[]      @default([])
+  notes                  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  exercises   WorkoutExercise[]
+  sessions    WorkoutSession[]
+  programDays ProgramDay[]
+
+  @@index([userId, scheduledDate])
+}
+
+model WorkoutExercise {
+  id               String   @id @default(cuid())
+  workoutId        String
+  workout          Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  exerciseId       String
+  exercise         Exercise @relation(fields: [exerciseId], references: [id])
+  order            Int
+  targetSets       Int
+  targetRepsMin    Int?
+  targetRepsMax    Int?
+  targetWeightKg   Float?
+  targetRestSec    Int?
+  notes            String?
+  supersetGroup    Int? // exercises sharing a value are grouped (W16)
+  supersetType     SupersetType @default(straight)
+
+  @@unique([workoutId, order])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Execution — what actually happened
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkoutSession {
+  id                String        @id @default(cuid())
+  userId            String
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workoutId         String?
+  workout           Workout?      @relation(fields: [workoutId], references: [id])
+  name              String
+  startedAt         DateTime      @default(now())
+  endedAt           DateTime?
+  status            SessionStatus @default(in_progress)
+  trackingMode      TrackingMode  @default(manual)
+  totalVolumeKg     Float         @default(0)
+  durationSeconds   Int           @default(0)
+  caloriesEstimate  Int?
+  healthWorkoutRef  String?
+  trainerComment    String?
+
+  createdAt DateTime @default(now())
+
+  performances      ExercisePerformance[]
+  muscleActivations MuscleActivation[]
+  personalRecords   PersonalRecord[]
+
+  @@index([userId, startedAt])
+}
+
+model ExercisePerformance {
+  id               String   @id @default(cuid())
+  sessionId        String
+  session          WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  exerciseId       String
+  exercise         Exercise @relation(fields: [exerciseId], references: [id])
+  order            Int
+  formScoreAvg     Float?
+  romAvg           Float?
+  supersetGroup    Int?
+
+  sets ExerciseSet[]
+
+  @@unique([sessionId, order])
+}
+
+model ExerciseSet {
+  id                  String   @id @default(cuid())
+  performanceId       String
+  performance         ExercisePerformance @relation(fields: [performanceId], references: [id], onDelete: Cascade)
+  setNumber           Int
+  weightKg            Float?
+  reps                Int?
+  rpe                 Float?
+  restSecondsTaken    Int?
+  isWarmup            Boolean  @default(false)
+  completedAt         DateTime?
+  formScore           Float? // camera-tracked only
+  romValue            Float?
+  isPersonalRecord    Boolean  @default(false)
+
+  formAnalyses    FormAnalysis[]
+  personalRecord  PersonalRecord?
+
+  @@unique([performanceId, setNumber])
+}
+
+model FormAnalysis {
+  id                 String   @id @default(cuid())
+  setId              String
+  set                ExerciseSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+  repIndex           Int
+  jointAngleSnapshot Json // key angles only — NOT raw pose frames
+  romValue           Float?
+  tempoSeconds       Float?
+  detectedFaults     Json // [{ type, severity }]
+  overallRepScore    Float?
+
+  @@unique([setId, repIndex])
+}
+
+model PersonalRecord {
+  id            String             @id @default(cuid())
+  userId        String
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId    String
+  exercise      Exercise           @relation(fields: [exerciseId], references: [id])
+  recordType    PersonalRecordType
+  value         Float
+  previousValue Float?
+  achievedAt    DateTime           @default(now())
+  setId         String?            @unique
+  set           ExerciseSet?       @relation(fields: [setId], references: [id])
+  sessionId     String?
+  session       WorkoutSession?    @relation(fields: [sessionId], references: [id])
+
+  @@index([userId, exerciseId, recordType])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Derived / computed layer
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MuscleActivation {
+  id              String      @id @default(cuid())
+  sessionId       String
+  session         WorkoutSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  muscleGroupId   String
+  muscleGroup     MuscleGroup @relation(fields: [muscleGroupId], references: [id])
+  role            MuscleRole
+  activationScore Float // 0..1 intensity feeding the 3D render
+
+  @@unique([sessionId, muscleGroupId, role])
+}
+
+model ProgressMetric {
+  id         String               @id @default(cuid())
+  userId     String
+  user       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  metricType ProgressMetricType
+  key        String? // for measurement subtype e.g. "waist", "arm_left"
+  value      Float
+  unit       String
+  recordedAt DateTime             @default(now())
+  source     ProgressMetricSource @default(manual_entry)
+
+  @@index([userId, metricType, recordedAt])
+}
+
+model BodyMeasurement {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weightKg   Float?
+  bodyFatPct Float?
+  chestCm    Float?
+  waistCm    Float?
+  hipsCm     Float?
+  thighCm    Float?
+  armCm      Float?
+  recordedAt DateTime @default(now())
+
+  @@index([userId, recordedAt])
+}
+
+model ProgressPhoto {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assetRef   String // storage key of the encrypted object
+  poseTag    PhotoPose @default(front)
+  takenAt    DateTime  @default(now())
+
+  @@index([userId, takenAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trainer chat
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ChatMessage {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role            ChatRole
+  content         String
+  richContent     Json? // inline cards: exercise / chart / applyAction
+  viaVoice        Boolean  @default(false)
+  trainerSnapshot Json? // §21: the Trainer config that produced this message (QA traceability)
+  appliedAt       DateTime? // set when an ApplyAction card in this message was applied
+  createdAt       DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/// Coaching Insights Log (T4) — trainer observations, distinct from chat turns.
+model CoachingInsight {
+  id          String          @id @default(cuid())
+  userId      String
+  user        User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    InsightCategory
+  title       String
+  body        String
+  dataRefs    Json? // links to the metrics/sessions that triggered it
+  sparkline   Json? // optional inline trend series
+  actions     String[]        @default([])
+  proactive   Boolean         @default(true) // true = surfaced by the engine, not asked for
+  dismissedAt DateTime?
+  createdAt   DateTime        @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/// Notification Preferences (S6)
+model NotificationPreference {
+  id                 String  @id @default(cuid())
+  userId             String  @unique
+  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workoutReminders   Boolean @default(true)
+  restTimerAlerts    Boolean @default(true)
+  trainerMessages    Boolean @default(true)
+  milestones         Boolean @default(true)
+  weeklySummary      Boolean @default(true)
+  checkIns           Boolean @default(true)
+  reminderTime       String  @default("18:00") // local HH:mm for the daily nudge
+  quietHoursStart    String? // HH:mm
+  quietHoursEnd      String?
+  updatedAt          DateTime @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Goals · achievements · streaks (web companion)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Goal {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key       String // "workouts", "protein", "steps", "sleep", ...
+  label     String
+  target    Float
+  unit      String
+  cadence   GoalCadence
+  tone      String      @default("pink")
+  active    Boolean     @default(true)
+  createdAt DateTime    @default(now())
+
+  entries GoalEntry[]
+
+  @@unique([userId, key])
+}
+
+model GoalEntry {
+  id        String   @id @default(cuid())
+  goalId    String
+  goal      Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  periodKey String // "2026-08-29" (daily) or "2026-W35" (weekly)
+  value     Float    @default(0)
+  completed Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@unique([goalId, periodKey])
+}
+
+model Achievement {
+  id          String @id @default(cuid())
+  key         String @unique
+  title       String
+  detail      String
+  icon        String
+  targetValue Float?
+
+  users UserAchievement[]
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  progress      Float    @default(0)
+  unlockedAt    DateTime?
+
+  @@unique([userId, achievementId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coin wallet + trainer customization store
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id        String        @id @default(cuid())
+  walletId  String
+  wallet    Wallet        @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type      WalletTxnType
+  amount    Int
+  label     String
+  createdAt DateTime      @default(now())
+
+  @@index([walletId, createdAt])
+}
+
+model StoreItem {
+  id       String        @id // stable slug e.g. "v-nova"
+  category StoreCategory
+  name     String
+  detail   String
+  price    Int
+  style    Json? // personality preset sliders
+  swatch   String?
+  isDefault Boolean      @default(false)
+
+  owners UserStoreItem[]
+}
+
+model UserStoreItem {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeItemId String
+  storeItem   StoreItem @relation(fields: [storeItemId], references: [id], onDelete: Cascade)
+  equipped    Boolean  @default(false)
+  acquiredAt  DateTime @default(now())
+
+  @@unique([userId, storeItemId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System — notifications, subscription, device sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // "trainer_message" | "reminder" | "milestone" | "pr"
+  title     String
+  body      String
+  readAt    DateTime?
+  deepLink  String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model Subscription {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan           String   @default("free") // "free" | "pro_monthly" | "pro_annual"
+  status         String   @default("inactive") // "active" | "inactive" | "grace" | "cancelled"
+  store          String? // "app_store" | "play_store"
+  originalTxnId  String?
+  currentPeriodEnd DateTime?
+  updatedAt      DateTime @updatedAt
+}
+
+model DeviceConnection {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider   String // "apple_health" | "health_connect" | "apple_watch" | "wear_os" | "whoop"
+  status     String   @default("connected")
+  lastSyncAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, provider])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Appearance engine · progressive disclosure · unlock progression
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Curated background/glass presets — backend-owned, changeable via seed without
+/// an app release. `isDefault` seeds new users; changing it re-themes everyone
+/// still on a preset (`UserAppearance.presetId != null`).
+model BackgroundPreset {
+  id              String  @id // slug, e.g. "aurora-plum"
+  name            String
+  mode            String // "solid" | "gradient" | "image"
+  backgroundColor String?
+  gradient        Json? // { angle, stops: [{ color, at }] }
+  imageUrl        String?
+  backgroundDim   Float   @default(0)
+  glass           Json // { opacity, blurPx, tint }
+  accentColor     String?
+  sortOrder       Int     @default(0)
+  isDefault       Boolean @default(false)
+  minTier         String? // null = always available; else gate by progression tier
+  storeItemId     String? // if set, requires owning this StoreItem (category "theme")
+}
+
+/// Per-user appearance override layer. `presetId` set → response mirrors the
+/// live preset values; editing any theme field nulls it.
+model UserAppearance {
+  userId             String   @id
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  presetId           String?
+  backgroundMode     String   @default("solid")
+  backgroundColor    String   @default("#170D17")
+  backgroundGradient Json?
+  backgroundImageUrl String?
+  backgroundDim      Float    @default(0)
+  glassOpacity       Float    @default(0.72) // clamp 0.35..0.95
+  glassBlurPx        Int      @default(18) // clamp 0..40
+  glassTint          String   @default("#2A1623")
+  accentColor        String?
+  reduceMotion       Boolean  @default(false)
+  updatedAt          DateTime @updatedAt
+}
+
+/// Progressive-disclosure preferences. Pure storage — the client computes
+/// effective visibility as `widgetOverrides[key] ?? mode`.
+model UserDisclosure {
+  userId          String   @id
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mode            String   @default("always") // "always" | "on_interaction"
+  widgetOverrides Json     @default("{}")
+  updatedAt       DateTime @updatedAt
+}
+
+/// Unlock progression. `unlockedFeatures` is additive and monotonic — never revoked.
+model UserProgression {
+  userId           String   @id
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier             String   @default("starter") // starter | building | established | full
+  unlockedFeatures String[] @default([])
+  gatingEnabled    Boolean  @default(true) // false = user chose "show me everything"
+  firstRunAt       DateTime @default(now())
+  lastEvaluatedAt  DateTime @default(now())
+}
