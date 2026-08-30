@@ -70,14 +70,62 @@ register / login / social         → { user, accessToken, refreshToken }
                     │ (old refresh token is now dead — replace it)
                     └─ on failure → sign in again
 
-logout   → POST /auth/logout { refreshToken }   (revokes it)
+logout       → POST /auth/logout { refreshToken }   (revokes that session)
+logout-all   → POST /auth/logout-all               (Bearer; revokes every session)
 ```
+
+Each session is a DB row (`Session`) that survives refresh-token rotation and
+carries a `revokedAt` flag the access-token guard checks on **every** request —
+so revoking a session (via `logout`, `logout-all`, `DELETE /me/sessions/:id`, a
+password reset, or an email change) kills its access token immediately, not just
+at the 15-minute expiry.
 
 New accounts are fully bootstrapped server-side (trainer config, wallet with 100
 coins, default store items equipped, notification prefs, the four starter goals,
-a free subscription). After sign-up, walk the client through `POST /me/onboarding`
-which accepts profile + trainer + equipment + injuries in one call and flips
-`onboardingCompletedAt`.
+a free subscription). A new email/password account is created **unverified**: it
+gets a session so the client can reach the "verify your email" screen, but every
+application route returns `403 email_not_verified` until the address is confirmed.
+Flow: `POST /auth/register` → email link → `POST /auth/verify-email { token }` →
+`POST /me/onboarding` → app. Social accounts are verified on creation.
+
+### Auth endpoints (all under `/auth`, no Bearer unless noted)
+
+| Method / path | Purpose |
+|---|---|
+| `POST /register` | create account, send verification email, start a session |
+| `POST /login` | `{ email, password, rememberMe? }`. `423 account_locked` after 8 failed attempts (15-min lock); generic `401 invalid_credentials` otherwise |
+| `POST /refresh` | rotate `{ refreshToken }` → `{ accessToken, refreshToken }` |
+| `POST /logout` | revoke this session |
+| `POST /logout-all` | *(Bearer)* revoke all of the user's sessions |
+| `GET /me` | *(Bearer)* current user incl. `emailVerified`, `role` |
+| `POST /verify-email` | `{ token }` → mark address verified |
+| `POST /resend-verification` | *(Bearer)* new link, throttled 1/min |
+| `POST /forgot-password` | always `200` (no account enumeration); emails a 1-hour link |
+| `POST /reset-password` | `{ token, password }`; revokes all sessions on success |
+| `POST /social/:provider` | `apple` \| `google` |
+
+### Account & Security (all under `/me`, Bearer + verified email)
+
+| Method / path | Purpose |
+|---|---|
+| `PUT /password` | `{ currentPassword, newPassword }`; revokes other sessions |
+| `POST /email/change` | `{ newEmail, currentPassword }`; emails a confirm link to the new address |
+| `POST /email/change/confirm` | `{ token }`; swaps the address, revokes other sessions |
+| `GET /sessions` · `DELETE /sessions/:id` · `DELETE /sessions` | list / revoke one / revoke all-but-current |
+| `GET /connected-accounts` · `DELETE /connected-accounts/:provider` | linked providers; unlink (refused if it would leave no way in) |
+| `DELETE /me` | `{ confirm: true, password? }`; soft-delete + revoke all sessions |
+
+Password policy (enforced server-side, also `GET /config/auth`): ≥ 8 chars and at
+least 3 of {lowercase, uppercase, digit, symbol}.
+
+Security-relevant events (logins, failures, lockouts, token refreshes, password /
+email changes, session revocations, account deletion) are written to an append-only
+`AuthEvent` audit table — never with raw tokens or passwords.
+
+Outbound email uses a pluggable transport: `console` (logs the message, the
+default in dev) or SMTP when `SMTP_URL` is set. In non-production the
+verification / reset endpoints also echo the token in the response
+(`devVerificationToken` / `devToken`) for testing.
 
 Social sign-in (`POST /auth/social/apple` | `/auth/social/google`): send the
 provider identity token as `identityToken`. In non-production the server accepts a
@@ -120,6 +168,14 @@ before real JWKS verification is wired.
 | PR List (P7) | `GET /progress/personal-records` |
 | Report Export (P8) | `GET /progress/report` |
 | Exercise Library (E1–E4) | `GET /library/exercises`, `GET /library/exercises/:slug`, `GET /library/muscle-groups/:key/exercises` |
+
+> **Exercise data source.** The library is enriched from the RepDB free-tier
+> dataset (repdb.co) via `npm run db:import-repdb` — images, descriptions,
+> instructions, form tips, MET, mechanic/force, training goals. Hand-curated
+> `source: "native"` rows are enriched in place; the rest import as
+> `source: "repdb"`. Idempotent, additive, never deletes. Attribution
+> ("Exercise data by RepDB — repdb.co") is required and rendered in the web
+> app (Settings ▸ About, Library footer).
 | Exercise Detail (E2) | `GET /library/exercises/:slug`, `GET /library/exercises/:slug/history` |
 | Settings (S1–S13) | `GET /me`, `PATCH /me`, `GET/PUT /me/settings` (the bundle), `GET/PUT /me/equipment`, `GET/PUT /me/devices/:provider`, `GET/PUT /notifications/preferences`, `GET /subscription` |
 | Appearance / theming | `GET /config/appearance-presets`, `PUT /me/settings { appearance }` |

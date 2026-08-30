@@ -9,11 +9,18 @@ import { SAFETY_WIDGETS } from "../data/progression.js";
 import { getSettingsBundle, applySettingsPatch, settingsPatchSchema } from "../services/settings.js";
 import { ensureProgression, evaluateProgression, setGating } from "../services/progression.js";
 import { authorizeUrl, isConfigured, providerConfig, revokeConnection, syncConnection, type WearableProvider } from "../services/wearables.js";
-import { badRequest, notFound } from "../lib/errors.js";
+import { badRequest, badRequestCode, conflict, notFound, unauthorized } from "../lib/errors.js";
+import { hashPassword, verifyPassword } from "../lib/auth.js";
+import { isProd } from "../env.js";
+import { listSessions, revokeSession, revokeAllSessions } from "../services/authSession.js";
+import { logAuthEvent } from "../services/audit.js";
+import { issueVerificationToken, consumeVerificationToken } from "../services/verification.js";
+import { sendEmailChangeEmail, sendSecurityAlert } from "../services/mail.js";
 
 export const meRouter = Router();
 meRouter.use(requireAuth);
 const uid = (req: unknown) => (req as AuthedRequest).userId;
+const authCtx = (req: unknown) => (req as AuthedRequest).auth;
 const RE_EVAL_MS = 6 * 60 * 60 * 1000;
 
 const profileSchema = z.object({
@@ -122,17 +129,173 @@ meRouter.get("/export", asyncHandler(async (req, res) => {
 
 meRouter.delete(
   "/",
-  validate({ body: z.object({ confirm: z.literal(true) }) }),
+  validate({ body: z.object({ confirm: z.literal(true), password: z.string().optional() }) }),
   asyncHandler(async (req, res) => {
     const userId = uid(req);
+    const { password } = req.body as { password?: string };
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (user.passwordHash) {
+      if (!password || !(await verifyPassword(password, user.passwordHash))) {
+        throw unauthorized("Password is incorrect", "invalid_credentials");
+      }
+    }
     // soft-delete + anonymize, then cascade-hard-delete via a worker/grace window
     await prisma.$transaction([
+      prisma.session.updateMany({ where: { userId }, data: { revokedAt: new Date() } }),
       prisma.refreshToken.updateMany({ where: { userId }, data: { revokedAt: new Date() } }),
       prisma.user.update({
         where: { id: userId },
         data: { deletedAt: new Date(), email: `deleted+${userId}@forma.invalid`, name: "Deleted user", passwordHash: null, appleSub: null, googleSub: null },
       }),
     ]);
+    await logAuthEvent(req, "account_deleted", { userId });
+    res.status(204).end();
+  }),
+);
+
+// ── Account & Security ──────────────────────────────────────────────────────
+
+/** Change password (authenticated). Revokes every other session. */
+meRouter.put(
+  "/password",
+  validate({
+    body: z.object({
+      currentPassword: z.string().min(1),
+      newPassword: z
+        .string()
+        .min(8)
+        .max(200)
+        .refine(
+          (v) => [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((re) => re.test(v)).length >= 3,
+          "Use a mix of upper- and lower-case letters, numbers, or symbols",
+        ),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const { currentPassword, newPassword } = req.body as { currentPassword: string; newPassword: string };
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (!user.passwordHash) {
+      throw badRequestCode("no_password", "This account signs in with Apple or Google — use “forgot password” to set one");
+    }
+    if (!(await verifyPassword(currentPassword, user.passwordHash))) {
+      throw unauthorized("Current password is incorrect", "invalid_credentials");
+    }
+    await prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: await hashPassword(newPassword), passwordChangedAt: new Date() },
+    });
+    await revokeAllSessions(userId, authCtx(req).sessionId);
+    await sendSecurityAlert(user.email, "Your password was changed. Other devices were signed out.");
+    await logAuthEvent(req, "password_changed", { userId });
+    res.json({ ok: true });
+  }),
+);
+
+/** Request an email change — sends a confirm link to the NEW address. */
+meRouter.post(
+  "/email/change",
+  validate({ body: z.object({ newEmail: z.string().trim().toLowerCase().email(), currentPassword: z.string().min(1) }) }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const { newEmail, currentPassword } = req.body as { newEmail: string; currentPassword: string };
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (!user.passwordHash || !(await verifyPassword(currentPassword, user.passwordHash))) {
+      throw unauthorized("Password is incorrect", "invalid_credentials");
+    }
+    if (newEmail === user.email) throw badRequest("That's already your email address");
+    if (await prisma.user.findUnique({ where: { email: newEmail } })) {
+      throw conflict("That email address is already in use");
+    }
+    const token = await issueVerificationToken(userId, "email_change", newEmail);
+    await sendEmailChangeEmail(newEmail, token);
+    await sendSecurityAlert(user.email, `An email change to ${newEmail} was requested. It is not active until confirmed from the new address.`);
+    await logAuthEvent(req, "email_change_requested", { userId, meta: { to: newEmail } });
+    res.json({ ok: true, ...(isProd ? {} : { devToken: token }) });
+  }),
+);
+
+/** Confirm an email change from the link sent to the new address. */
+meRouter.post(
+  "/email/change/confirm",
+  validate({ body: z.object({ token: z.string().min(10) }) }),
+  asyncHandler(async (req, res) => {
+    const result = await consumeVerificationToken((req.body as { token: string }).token, "email_change");
+    if (!result.ok) {
+      throw result.reason === "expired"
+        ? badRequestCode("token_expired", "This confirmation link has expired")
+        : badRequestCode("token_invalid", "This confirmation link is invalid");
+    }
+    if (result.userId !== uid(req)) throw unauthorized("This link belongs to a different account");
+    if (!result.newEmail) throw badRequest("Malformed token");
+    if (await prisma.user.findUnique({ where: { email: result.newEmail } })) {
+      throw conflict("That email address is now in use");
+    }
+    await prisma.user.update({
+      where: { id: result.userId },
+      data: { email: result.newEmail, emailVerifiedAt: new Date() },
+    });
+    await revokeAllSessions(result.userId, authCtx(req).sessionId);
+    await logAuthEvent(req, "email_changed", { userId: result.userId, email: result.newEmail });
+    res.json({ ok: true, email: result.newEmail });
+  }),
+);
+
+// ── active sessions / devices ───────────────────────────────────────────────
+meRouter.get(
+  "/sessions",
+  asyncHandler(async (req, res) => {
+    res.json(await listSessions(uid(req), authCtx(req).sessionId));
+  }),
+);
+
+meRouter.delete(
+  "/sessions/:id",
+  asyncHandler(async (req, res) => {
+    const revoked = await revokeSession(req.params.id, uid(req));
+    if (!revoked) throw notFound("Session not found");
+    await logAuthEvent(req, "session_revoked", { userId: uid(req), meta: { sessionId: req.params.id } });
+    res.status(204).end();
+  }),
+);
+
+meRouter.delete(
+  "/sessions",
+  asyncHandler(async (req, res) => {
+    const count = await revokeAllSessions(uid(req), authCtx(req).sessionId);
+    await logAuthEvent(req, "logout_all", { userId: uid(req), meta: { sessions: count, keptCurrent: true } });
+    res.json({ ok: true, revoked: count });
+  }),
+);
+
+// ── connected login providers ──────────────────────────────────────────────
+meRouter.get(
+  "/connected-accounts",
+  asyncHandler(async (req, res) => {
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: uid(req) } });
+    res.json({
+      password: !!user.passwordHash,
+      google: !!user.googleSub,
+      apple: !!user.appleSub,
+    });
+  }),
+);
+
+meRouter.delete(
+  "/connected-accounts/:provider",
+  validate({ params: z.object({ provider: z.enum(["google", "apple"]) }) }),
+  asyncHandler(async (req, res) => {
+    const provider = req.params.provider as "google" | "apple";
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: uid(req) } });
+    const subField = provider === "google" ? "googleSub" : "appleSub";
+    const other = provider === "google" ? user.appleSub : user.googleSub;
+    if (!user[subField]) throw badRequest(`No ${provider} account is linked`);
+    if (!user.passwordHash && !other) {
+      throw badRequestCode("last_credential", "Set a password before unlinking your only sign-in method");
+    }
+    await prisma.user.update({ where: { id: user.id }, data: { [subField]: null } });
+    await sendSecurityAlert(user.email, `Your ${provider} account was unlinked from Forma.`);
+    await logAuthEvent(req, "connected_account_unlinked", { userId: user.id, meta: { provider } });
     res.status(204).end();
   }),
 );

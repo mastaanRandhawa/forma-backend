@@ -4,53 +4,81 @@ import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import crypto from "node:crypto";
+import { loginLimiter } from "../middleware/rateLimit.js";
 import {
   hashPassword,
   verifyPassword,
-  signAccessToken,
-  newRefreshToken,
-  hashRefreshToken,
 } from "../lib/auth.js";
-import { badRequest, unauthorized } from "../lib/errors.js";
+import { randomToken, sha256 } from "../lib/crypto.js";
+import { badRequestCode, conflict, locked, unauthorized } from "../lib/errors.js";
+import { isProd } from "../env.js";
 import { STORE_ITEMS, GOAL_TEMPLATES } from "../data/store.js";
 import { verifySocialToken } from "../services/social-auth.js";
+import {
+  issueSession,
+  rotateSession,
+  revokeSession,
+  revokeAllSessions,
+  readRefreshToken,
+} from "../services/authSession.js";
+import { logAuthEvent } from "../services/audit.js";
+import { issueVerificationToken, consumeVerificationToken } from "../services/verification.js";
+import {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+  sendSecurityAlert,
+} from "../services/mail.js";
 
 export const authRouter = Router();
 
-const credentials = z.object({
-  email: z.string().email(),
-  password: z.string().min(8).max(200),
-  name: z.string().min(1).max(80).optional(),
+const LOCK_THRESHOLD = 8;
+const LOCK_MINUTES = 15;
+
+// ── validation ──────────────────────────────────────────────────────────────
+const email = z.string().trim().toLowerCase().email();
+
+/** Min 8 chars and a mix of at least three character classes. */
+const password = z
+  .string()
+  .min(8, "Password must be at least 8 characters")
+  .max(200)
+  .refine((v) => {
+    const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((re) => re.test(v)).length;
+    return classes >= 3;
+  }, "Use a mix of upper- and lower-case letters, numbers, or symbols");
+
+const registerSchema = z
+  .object({
+    email,
+    password,
+    name: z.string().trim().min(1).max(80).optional(),
+    firstName: z.string().trim().min(1).max(40).optional(),
+    lastName: z.string().trim().min(1).max(40).optional(),
+    rememberMe: z.boolean().optional(),
+  })
+  .transform((v) => ({
+    ...v,
+    name: v.name ?? ([v.firstName, v.lastName].filter(Boolean).join(" ") || v.email.split("@")[0]!),
+  }));
+
+const loginSchema = z.object({
+  email,
+  password: z.string().min(1).max(200),
+  rememberMe: z.boolean().optional(),
 });
 
-async function issueSession(user: { id: string; email: string }, req: { headers: Record<string, unknown> }) {
-  const refresh = newRefreshToken();
-  await prisma.refreshToken.create({
-    data: {
-      userId: user.id,
-      tokenHash: refresh.hash,
-      expiresAt: refresh.expiresAt,
-      userAgent: String(req.headers["user-agent"] ?? ""),
-    },
-  });
-  return {
-    accessToken: signAccessToken({ sub: user.id, email: user.email }),
-    refreshToken: refresh.raw,
-  };
-}
-
-/** Everything a brand-new account needs: trainer config, wallet, prefs, goals, default store items. */
-async function bootstrapUser(userId: string) {
+// ── new-account bootstrap (trainer / wallet / prefs / goals / default items) ──
+export async function bootstrapUser(userId: string) {
   await prisma.trainer.create({ data: { userId } });
   await prisma.wallet.create({ data: { userId, balance: 100 } });
   await prisma.notificationPreference.create({ data: { userId } });
   await prisma.subscription.create({ data: { userId } });
   await prisma.userAppearance.create({ data: { userId } });
   await prisma.userDisclosure.create({ data: { userId } });
-  await prisma.userProgression.create({ data: { userId, unlockedFeatures: ["dashboard", "workouts", "trainer"] } });
-  const defaults = STORE_ITEMS.filter((i) => i.isDefault);
-  for (const item of defaults) {
+  await prisma.userProgression.create({
+    data: { userId, unlockedFeatures: ["dashboard", "workouts", "trainer"] },
+  });
+  for (const item of STORE_ITEMS.filter((i) => i.isDefault)) {
     await prisma.userStoreItem.create({ data: { userId, storeItemId: item.id, equipped: true } });
   }
   for (const g of GOAL_TEMPLATES) {
@@ -60,164 +88,296 @@ async function bootstrapUser(userId: string) {
   }
 }
 
+const publicUser = (u: {
+  id: string; email: string; name: string; authProvider: string;
+  onboardingCompletedAt: Date | null; emailVerifiedAt: Date | null; role: string;
+}) => ({
+  id: u.id,
+  email: u.email,
+  name: u.name,
+  authProvider: u.authProvider,
+  onboardingCompletedAt: u.onboardingCompletedAt,
+  emailVerified: u.authProvider !== "email" || u.emailVerifiedAt != null,
+  role: u.role,
+});
+
+// ── register ────────────────────────────────────────────────────────────────
 authRouter.post(
   "/register",
-  validate({ body: credentials }),
+  validate({ body: registerSchema }),
   asyncHandler(async (req, res) => {
-    const { email, password, name } = req.body as z.infer<typeof credentials>;
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) throw badRequest("Email already registered");
+    const { email: addr, password: pw, name } = req.body as z.infer<typeof registerSchema>;
+
+    const existing = await prisma.user.findUnique({ where: { email: addr } });
+    if (existing) throw conflict("An account with that email already exists");
 
     const user = await prisma.user.create({
-      data: { email, name: name ?? email.split("@")[0]!, passwordHash: await hashPassword(password) },
+      data: { email: addr, name, passwordHash: await hashPassword(pw) },
     });
     await bootstrapUser(user.id);
 
-    const tokens = await issueSession(user, req);
-    res.status(201).json({ user: { id: user.id, email: user.email, name: user.name }, ...tokens });
-  }),
-);
+    const token = await issueVerificationToken(user.id, "email_verify");
+    await sendVerificationEmail(user.email, token);
+    await logAuthEvent(req, "register", { userId: user.id, email: user.email });
+    await logAuthEvent(req, "email_verification_sent", { userId: user.id, email: user.email });
 
-authRouter.post(
-  "/login",
-  validate({ body: credentials.pick({ email: true, password: true }) }),
-  asyncHandler(async (req, res) => {
-    const { email, password } = req.body as { email: string; password: string };
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user?.passwordHash || !(await verifyPassword(password, user.passwordHash))) {
-      throw unauthorized("Invalid email or password");
-    }
-    const tokens = await issueSession(user, req);
-    res.json({
-      user: { id: user.id, email: user.email, name: user.name, onboardingCompletedAt: user.onboardingCompletedAt },
-      ...tokens,
+    const s = await issueSession(user, req, {
+      rememberMe: (req.body as { rememberMe?: boolean }).rememberMe,
+    });
+    res.status(201).json({
+      user: publicUser(user),
+      accessToken: s.accessToken,
+      refreshToken: s.refreshToken,
+      ...(isProd ? {} : { devVerificationToken: token }),
     });
   }),
 );
 
+// ── login ───────────────────────────────────────────────────────────────────
+authRouter.post(
+  "/login",
+  loginLimiter,
+  validate({ body: loginSchema }),
+  asyncHandler(async (req, res) => {
+    const { email: addr, password: pw, rememberMe } = req.body as z.infer<typeof loginSchema>;
+    const user = await prisma.user.findUnique({ where: { email: addr } });
+
+    if (user?.lockedUntil && user.lockedUntil > new Date()) {
+      await logAuthEvent(req, "login_failed", { userId: user.id, email: addr, meta: { reason: "locked" } });
+      throw locked(
+        `Too many failed attempts. Try again in ${Math.ceil(
+          (user.lockedUntil.getTime() - Date.now()) / 60_000,
+        )} minutes, or reset your password.`,
+      );
+    }
+
+    const ok = user?.passwordHash && (await verifyPassword(pw, user.passwordHash));
+    if (!user || !ok) {
+      if (user) {
+        const next = user.failedLoginCount + 1;
+        const hitLimit = next >= LOCK_THRESHOLD;
+        await prisma.user.update({
+          where: { id: user.id },
+          data: hitLimit
+            ? { failedLoginCount: 0, lockedUntil: new Date(Date.now() + LOCK_MINUTES * 60_000) }
+            : { failedLoginCount: next },
+        });
+        await logAuthEvent(req, hitLimit ? "login_locked" : "login_failed", {
+          userId: user.id,
+          email: addr,
+        });
+        if (hitLimit) {
+          await sendSecurityAlert(user.email, `Sign-in locked for ${LOCK_MINUTES} minutes after repeated failed attempts.`);
+        }
+      } else {
+        await logAuthEvent(req, "login_failed", { email: addr });
+      }
+      // identical response whether the account exists or not
+      throw unauthorized("Invalid email or password", "invalid_credentials");
+    }
+
+    if (user.failedLoginCount > 0 || user.lockedUntil) {
+      await prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
+    }
+    await logAuthEvent(req, "login_success", { userId: user.id, email: user.email });
+
+    const s = await issueSession(user, req, { rememberMe });
+    res.json({ user: publicUser(user), accessToken: s.accessToken, refreshToken: s.refreshToken });
+  }),
+);
+
+// ── refresh — rotate the refresh token, mint a new access token ──────────────
 authRouter.post(
   "/refresh",
   validate({ body: z.object({ refreshToken: z.string().min(10) }) }),
   asyncHandler(async (req, res) => {
-    const raw = (req.body as { refreshToken: string }).refreshToken;
-    const record = await prisma.refreshToken.findUnique({
-      where: { tokenHash: hashRefreshToken(raw) },
-      include: { user: true },
-    });
-    if (!record || record.revokedAt || record.expiresAt < new Date()) {
-      throw unauthorized("Refresh token invalid or expired");
-    }
-    // rotate
-    await prisma.refreshToken.update({ where: { id: record.id }, data: { revokedAt: new Date() } });
-    const tokens = await issueSession(record.user, req);
-    res.json(tokens);
+    const raw = readRefreshToken(req);
+    if (!raw) throw unauthorized("Missing refresh token", "session_expired");
+    const s = await rotateSession(raw, req);
+    if (!s) throw unauthorized("Refresh token invalid or expired", "session_expired");
+    res.json({ accessToken: s.accessToken, refreshToken: s.refreshToken });
   }),
 );
 
+// ── logout (this device) ────────────────────────────────────────────────────
 authRouter.post(
   "/logout",
-  validate({ body: z.object({ refreshToken: z.string().min(10) }) }),
+  validate({ body: z.object({ refreshToken: z.string().min(10).optional() }) }),
   asyncHandler(async (req, res) => {
-    await prisma.refreshToken.updateMany({
-      where: { tokenHash: hashRefreshToken((req.body as { refreshToken: string }).refreshToken) },
-      data: { revokedAt: new Date() },
-    });
+    const raw = readRefreshToken(req);
+    if (raw) {
+      const rec = await prisma.refreshToken.findUnique({
+        where: { tokenHash: sha256(raw) },
+        select: { sessionId: true, userId: true },
+      });
+      if (rec?.sessionId) await revokeSession(rec.sessionId);
+      if (rec) await logAuthEvent(req, "logout", { userId: rec.userId });
+    }
     res.status(204).end();
   }),
 );
 
+// ── logout everywhere ───────────────────────────────────────────────────────
+authRouter.post(
+  "/logout-all",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { userId } = (req as AuthedRequest).auth;
+    const count = await revokeAllSessions(userId);
+    await logAuthEvent(req, "logout_all", { userId, meta: { sessions: count } });
+    res.status(204).end();
+  }),
+);
+
+// ── current user ────────────────────────────────────────────────────────────
 authRouter.get(
   "/me",
   requireAuth,
   asyncHandler(async (req, res) => {
     const user = await prisma.user.findUniqueOrThrow({
-      where: { id: (req as AuthedRequest).userId },
+      where: { id: (req as AuthedRequest).auth.userId },
       include: { trainer: true, wallet: true },
     });
     const { passwordHash, appleSub, googleSub, ...safe } = user;
-    res.json(safe);
+    res.json({ ...safe, emailVerified: user.authProvider !== "email" || user.emailVerifiedAt != null });
   }),
 );
 
-// ── Sign in with Apple / Google (O2) ──────────────────────────────────────
+// ── email verification ──────────────────────────────────────────────────────
+authRouter.post(
+  "/verify-email",
+  validate({ body: z.object({ token: z.string().min(10) }) }),
+  asyncHandler(async (req, res) => {
+    const { token } = req.body as { token: string };
+    const result = await consumeVerificationToken(token, "email_verify");
+    if (!result.ok) {
+      throw result.reason === "expired"
+        ? badRequestCode("token_expired", "This verification link has expired")
+        : badRequestCode("token_invalid", "This verification link is invalid");
+    }
+    await prisma.user.update({
+      where: { id: result.userId },
+      data: { emailVerifiedAt: new Date() },
+    });
+    await logAuthEvent(req, "email_verified", { userId: result.userId });
+    res.json({ ok: true });
+  }),
+);
+
+authRouter.post(
+  "/resend-verification",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { userId, email: addr } = (req as AuthedRequest).auth;
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    if (user.authProvider !== "email" || user.emailVerifiedAt) {
+      return res.json({ ok: true, alreadyVerified: true });
+    }
+    const recent = await prisma.verificationToken.findFirst({
+      where: { userId, purpose: "email_verify" },
+      orderBy: { createdAt: "desc" },
+    });
+    if (recent && Date.now() - recent.createdAt.getTime() < 60_000) {
+      return res.json({ ok: true, throttled: true });
+    }
+    const token = await issueVerificationToken(userId, "email_verify");
+    await sendVerificationEmail(addr, token);
+    await logAuthEvent(req, "email_verification_sent", { userId, email: addr });
+    res.json({ ok: true, ...(isProd ? {} : { devVerificationToken: token }) });
+  }),
+);
+
+// ── password reset ──────────────────────────────────────────────────────────
+authRouter.post(
+  "/forgot-password",
+  validate({ body: z.object({ email }) }),
+  asyncHandler(async (req, res) => {
+    const addr = (req.body as { email: string }).email;
+    const user = await prisma.user.findUnique({ where: { email: addr } });
+    await logAuthEvent(req, "password_reset_requested", { userId: user?.id ?? null, email: addr });
+
+    let devToken: string | undefined;
+    if (user?.passwordHash) {
+      const raw = randomToken(32);
+      await prisma.passwordReset.create({
+        data: { userId: user.id, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + 3_600_000) },
+      });
+      await sendPasswordResetEmail(user.email, raw);
+      if (!isProd) devToken = raw;
+    }
+    // Always 200 — never reveal whether the address has an account.
+    res.json({ ok: true, ...(devToken ? { devToken } : {}) });
+  }),
+);
+
+authRouter.post(
+  "/reset-password",
+  validate({ body: z.object({ token: z.string().min(10), password }) }),
+  asyncHandler(async (req, res) => {
+    const { token, password: pw } = req.body as { token: string; password: string };
+    const record = await prisma.passwordReset.findUnique({ where: { tokenHash: sha256(token) } });
+    if (!record || record.usedAt) throw badRequestCode("token_invalid", "This reset link is invalid");
+    if (record.expiresAt < new Date()) throw badRequestCode("reset_link_expired", "This reset link has expired");
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: record.userId },
+        data: { passwordHash: await hashPassword(pw), passwordChangedAt: new Date(), failedLoginCount: 0, lockedUntil: null },
+      }),
+      prisma.passwordReset.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
+    ]);
+    await revokeAllSessions(record.userId);
+    const u = await prisma.user.findUnique({ where: { id: record.userId }, select: { email: true } });
+    if (u) await sendSecurityAlert(u.email, "Your password was reset. All sessions were signed out.");
+    await logAuthEvent(req, "password_reset_completed", { userId: record.userId });
+    res.json({ ok: true });
+  }),
+);
+
+// ── Sign in with Apple / Google ─────────────────────────────────────────────
 authRouter.post(
   "/social/:provider",
   validate({
     params: z.object({ provider: z.enum(["apple", "google"]) }),
-    body: z.object({ identityToken: z.string().min(10), name: z.string().optional() }),
+    body: z.object({ identityToken: z.string().min(10), name: z.string().optional(), rememberMe: z.boolean().optional() }),
   }),
   asyncHandler(async (req, res) => {
     const provider = req.params.provider as "apple" | "google";
-    const { identityToken, name } = req.body as { identityToken: string; name?: string };
+    const { identityToken, name, rememberMe } = req.body as {
+      identityToken: string; name?: string; rememberMe?: boolean;
+    };
     const profile = await verifySocialToken(provider, identityToken);
-    if (!profile) throw unauthorized("Could not verify identity token");
+    if (!profile) throw unauthorized("Could not verify identity token", "invalid_credentials");
 
     const subField = provider === "apple" ? "appleSub" : "googleSub";
     let user = await prisma.user.findFirst({
-      where: { OR: [{ [subField]: profile.sub }, ...(profile.email ? [{ email: profile.email }] : [])] },
+      where: { OR: [{ [subField]: profile.sub }, ...(profile.email ? [{ email: profile.email.toLowerCase() }] : [])] },
     });
 
     let created = false;
     if (!user) {
       user = await prisma.user.create({
         data: {
-          email: profile.email ?? `${provider}_${profile.sub}@forma.invalid`,
+          email: profile.email?.toLowerCase() ?? `${provider}_${profile.sub}@forma.invalid`,
           name: name ?? profile.name ?? "Athlete",
           authProvider: provider,
+          emailVerifiedAt: new Date(), // provider already verified the address
           [subField]: profile.sub,
         },
       });
       await bootstrapUser(user.id);
       created = true;
+      await logAuthEvent(req, "register", { userId: user.id, email: user.email, meta: { provider } });
     } else if (!(user as Record<string, unknown>)[subField]) {
       user = await prisma.user.update({ where: { id: user.id }, data: { [subField]: profile.sub } });
     }
 
-    const tokens = await issueSession(user, req);
+    await logAuthEvent(req, "login_success", { userId: user.id, email: user.email, meta: { provider } });
+    const s = await issueSession(user, req, { rememberMe });
     res.status(created ? 201 : 200).json({
-      user: { id: user.id, email: user.email, name: user.name, onboardingCompletedAt: user.onboardingCompletedAt },
-      ...tokens,
+      user: publicUser(user),
+      accessToken: s.accessToken,
+      refreshToken: s.refreshToken,
     });
-  }),
-);
-
-// ── Password reset (O2) ──────────────────────────────────────────────────
-authRouter.post(
-  "/forgot-password",
-  validate({ body: z.object({ email: z.string().email() }) }),
-  asyncHandler(async (req, res) => {
-    const user = await prisma.user.findUnique({ where: { email: (req.body as { email: string }).email } });
-    // always 200 — do not leak whether the address exists
-    if (user?.passwordHash) {
-      const raw = crypto.randomBytes(32).toString("base64url");
-      await prisma.passwordReset.create({
-        data: {
-          userId: user.id,
-          tokenHash: crypto.createHash("sha256").update(raw).digest("hex"),
-          expiresAt: new Date(Date.now() + 3_600_000),
-        },
-      });
-      // TODO send `raw` by email. Returned here only in non-production for testing.
-      if (process.env.NODE_ENV !== "production") return res.json({ ok: true, devToken: raw });
-    }
-    res.json({ ok: true });
-  }),
-);
-
-authRouter.post(
-  "/reset-password",
-  validate({ body: z.object({ token: z.string().min(10), password: z.string().min(8).max(200) }) }),
-  asyncHandler(async (req, res) => {
-    const { token, password } = req.body as { token: string; password: string };
-    const record = await prisma.passwordReset.findUnique({
-      where: { tokenHash: crypto.createHash("sha256").update(token).digest("hex") },
-    });
-    if (!record || record.usedAt || record.expiresAt < new Date()) throw badRequest("Reset token invalid or expired");
-    await prisma.$transaction([
-      prisma.user.update({ where: { id: record.userId }, data: { passwordHash: await hashPassword(password) } }),
-      prisma.passwordReset.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-      prisma.refreshToken.updateMany({ where: { userId: record.userId }, data: { revokedAt: new Date() } }),
-    ]);
-    res.json({ ok: true });
   }),
 );

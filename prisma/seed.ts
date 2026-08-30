@@ -82,6 +82,7 @@ async function main() {
         heightCm: 180,
         weightKg: 82,
         onboardingCompletedAt: new Date(),
+        emailVerifiedAt: new Date(),
       },
     });
     await prisma.trainer.create({ data: { userId: user.id, name: "Kai" } });

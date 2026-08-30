@@ -27,6 +27,17 @@ enum AuthProvider {
   google
 }
 
+enum Role {
+  user
+  admin
+}
+
+/// Purpose discriminator for one-time email tokens (verify / change-email).
+enum VerificationPurpose {
+  email_verify
+  email_change
+}
+
 enum UnitPreference {
   metric
   imperial
@@ -194,6 +205,13 @@ model User {
   appleSub     String?      @unique
   googleSub    String?      @unique
 
+  // ── auth security (see modules/auth.ts, middleware/auth.ts) ──
+  role              Role      @default(user)
+  emailVerifiedAt   DateTime? // null ⇒ email/password account still unverified
+  passwordChangedAt DateTime?
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime? // brute-force lockout window
+
   dateOfBirth      DateTime?
   biologicalSex    String? // "male" | "female" | "other" | "prefer_not_to_say"
   heightCm         Float?
@@ -218,8 +236,11 @@ model User {
   deletedAt DateTime? // soft-delete for account removal
 
   trainer              Trainer?
+  authSessions         Session[]
   refreshTokens        RefreshToken[]
   passwordResets       PasswordReset[]
+  verificationTokens   VerificationToken[]
+  authEvents           AuthEvent[]
   injuries             InjuryNote[]
   equipment            UserEquipment[]
   workouts             Workout[]
@@ -261,10 +282,30 @@ model PasswordReset {
   @@index([userId])
 }
 
+/// A durable login session ("device"). Survives refresh-token rotation; carries
+/// the revocation flag the access-token check enforces on every request.
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  lastSeenAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  userAgent  String?
+  ip         String?
+
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+}
+
 model RefreshToken {
   id        String    @id @default(cuid())
   userId    String
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId String?
+  session   Session?  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
@@ -273,6 +314,39 @@ model RefreshToken {
   ip        String?
 
   @@index([userId])
+  @@index([sessionId])
+}
+
+/// One-time email token for address verification and email-change confirmation.
+model VerificationToken {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   VerificationPurpose
+  tokenHash String              @unique
+  newEmail  String? // set only for purpose = email_change
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  @@index([userId, purpose])
+}
+
+/// Append-only audit trail for security-relevant auth events. Never stores raw
+/// tokens, passwords, or MFA secrets.
+model AuthEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String? // captured for events with no resolvable user (failed login)
+  event     String // "login_success" | "login_failed" | "mfa_enabled" | ...
+  ip        String?
+  userAgent String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([event, createdAt])
 }
 
 model InjuryNote {
@@ -368,6 +442,25 @@ model Exercise {
   supportsCameraTracking Boolean         @default(false)
   alternativeSlugs       String[]        @default([])
 
+  // ── Enrichment layer — provenance + RepDB (repdb.co) free-tier fields ──────
+  // `source` = "native" (hand-curated seed) | "repdb" (imported). `externalId`
+  // is the RepDB slug; native rows may also carry it once matched/enriched.
+  // These fields never feed the adaptation engine — they are display metadata.
+  source        String   @default("native")
+  externalId    String?  @unique
+  description   String?
+  formTips      String[] @default([]) // RepDB `tips_en` (distinct from AI-generated aiFormTips)
+  bodyPart      String? // "chest" | "back" | "upper_legs" | ...
+  forceType     String? // "push" | "pull" | "static" | "dynamic"
+  mechanic      String? // "compound" | "isolation"
+  discipline    String? // RepDB `category`: "strength" | "stretching" | "cardio" | "olympic" | "plyometrics"
+  isUnilateral  Boolean?
+  isBodyweight  Boolean?
+  metValue      Float? // metabolic equivalent — calorie estimation only
+  trainingGoals String[] @default([]) // "hypertrophy" | "strength" | "endurance" | "mobility" | "power" | ...
+  imageStartUrl String? // start-position illustration (RepDB flat 512px WebP)
+  imageEndUrl   String? // peak / end-position illustration (single-pose moves reuse imageStartUrl)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -377,6 +470,7 @@ model Exercise {
   personalRecords  PersonalRecord[]
 
   @@index([category])
+  @@index([source])
 }
 
 model ExerciseMuscle {

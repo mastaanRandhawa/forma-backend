@@ -28,6 +28,12 @@ describe("API surface", () => {
     expect(res.body.error.code).toBe("unauthorized");
   });
 
+  it("protected route with a garbage bearer token → 401 session_expired", async () => {
+    const res = await request(app).get("/api/v1/dashboard").set("Authorization", "Bearer not.a.jwt");
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe("session_expired");
+  });
+
   it("invalid body → 400 with validation details", async () => {
     const res = await request(app).post("/api/v1/auth/register").send({ email: "not-an-email", password: "x" });
     expect(res.status).toBe(400);

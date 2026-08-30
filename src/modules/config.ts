@@ -4,8 +4,26 @@ import { asyncHandler } from "../lib/http.js";
 import { optionalAuth, type AuthedRequest } from "../middleware/auth.js";
 import { TIER_ORDER } from "../data/progression.js";
 import { readProgression } from "../services/progression.js";
+import { env } from "../env.js";
 
 export const configRouter = Router();
+
+/**
+ * Public auth-related config for the web app: which social providers are wired
+ * up on this deployment (so the sign-in buttons only render when usable).
+ */
+configRouter.get("/auth", (_req, res) => {
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.json({
+    providers: {
+      google: !!env.OAUTH_GOOGLE_CLIENT_ID,
+      apple: !!env.OAUTH_APPLE_CLIENT_ID,
+    },
+    googleClientId: env.OAUTH_GOOGLE_CLIENT_ID || null,
+    appleClientId: env.OAUTH_APPLE_CLIENT_ID || null,
+    passwordPolicy: { minLength: 8, classesRequired: 3 },
+  });
+});
 
 /**
  * Appearance presets available to the caller.
