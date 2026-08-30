@@ -86,11 +86,48 @@ In the frontend's `.env`:
 VITE_API_URL=http://localhost:4000/api/v1
 ```
 
-### Deploy
+### Deploy to Render
+
+**Blueprint (easiest):** Render dashboard → *New* → *Blueprint* → select this repo.
+`render.yaml` provisions a Postgres + a web service, generates the JWT secrets, and
+wires `DATABASE_URL`. After the first deploy succeeds, open the service *Shell* and
+run `npm run db:seed` once. Edit `WEB_ORIGIN` in `render.yaml` to your frontend's
+origin.
+
+**Manual web service** — *New* → *Web Service* → this repo:
+
+| Field | Value |
+|---|---|
+| Runtime | Node |
+| Build command | `npm ci --include=dev && npm run build` |
+| Start command | `npm run prisma:deploy && npm start` |
+| Health check path | `/api/v1/health` |
+
+Environment variables:
+
+| Key | Value |
+|---|---|
+| `NODE_ENV` | `production` |
+| `DATABASE_URL` | link the Render Postgres (use its **Internal** URL — same region, no `sslmode` needed) |
+| `JWT_ACCESS_SECRET` | *Generate* |
+| `JWT_REFRESH_SECRET` | *Generate* |
+| `WEB_ORIGIN` | your frontend origin, e.g. `https://mastaanrandhawa.github.io` (comma-separated for several, no trailing slash) |
+| `ANTHROPIC_API_KEY` | optional — omit for the deterministic offline trainer |
+| `AI_MODEL` | optional — defaults to `claude-sonnet-5` |
+
+`PORT` is injected by Render automatically. `prisma generate` runs on `npm ci` via
+the `postinstall` hook; `prisma migrate deploy` runs on every deploy via the start
+command. Seed once from the Shell: `npm run db:seed`.
+
+Notes: free Postgres expires after 30 days; free web services sleep after 15 min
+idle (cold start ~30s). The background `worker` (reminders / cleanup) is optional
+and needs a paid plan — see the commented block in `render.yaml`.
+
+### Deploy with Docker
 
 `Dockerfile` builds a production image that runs `prisma migrate deploy` then the
 server. Provide `DATABASE_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`,
-`WEB_ORIGIN` (and optionally `ANTHROPIC_API_KEY`) as environment variables.
+`WEB_ORIGIN` (and optionally `ANTHROPIC_API_KEY`).
 
 ```bash
 docker build -t forma-backend .

@@ -16,6 +16,7 @@ plus the mock data the web app ships (`frontend/src/lib/data.ts`).
 |---|---|
 | Language | TypeScript (strict, ESM, NodeNext) |
 | Runtime | Node 22 |
+| Deploy | `render.yaml` blueprint (web service + Postgres), or the `Dockerfile` |
 | HTTP | Express 4 |
 | ORM / DB | Prisma 6 + PostgreSQL 16 |
 | Auth | JWT access + rotating opaque refresh tokens (SHA-256 hashed at rest); bcrypt; Sign in with Apple / Google; password reset |

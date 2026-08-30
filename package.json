@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Forma — AI Personal Trainer · cloud backend (TypeScript + Express + Prisma)",
   "scripts": {
+    "postinstall": "prisma generate",
     "dev": "tsx watch src/index.ts",
     "worker": "tsx watch src/worker.ts",
     "worker:start": "node dist/worker.js",
