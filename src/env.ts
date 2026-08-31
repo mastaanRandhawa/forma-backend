@@ -36,6 +36,16 @@ const schema = z.object({
   OURA_CLIENT_SECRET: z.string().optional().default(""),
   GARMIN_CLIENT_ID: z.string().optional().default(""),
   GARMIN_CLIENT_SECRET: z.string().optional().default(""),
+
+  // Food logging. USDA FoodData Central key stays server-side — all USDA calls
+  // are proxied through /api/v1/food/*. Empty ⇒ text search degrades to Open
+  // Food Facts only. Open Food Facts asks for an identifying User-Agent.
+  USDA_FDC_API_KEY: z.string().optional().default(""),
+  OPEN_FOOD_FACTS_USER_AGENT: z
+    .string()
+    .default("Forma/1.0 (https://forma.app; nutrition@forma.app)"),
+  // days a cached Food row is considered fresh before it is re-fetched from source
+  FOOD_CACHE_TTL_DAYS: z.coerce.number().default(30),
 });
 
 const parsed = schema.safeParse(process.env);

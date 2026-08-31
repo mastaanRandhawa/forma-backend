@@ -256,6 +256,7 @@ model User {
   achievements         UserAchievement[]
   wallet               Wallet?
   ownedStoreItems      UserStoreItem[]
+  customization        UserCustomization?
   notifications        Notification[]
   notificationPrefs    NotificationPreference?
   subscription         Subscription?
@@ -266,6 +267,10 @@ model User {
   recommendationAudits RecommendationAudit[]
   recoveryCheckins     RecoveryCheckin[]
   nutritionEntries     NutritionEntry[]
+  customFoods          Food[]                @relation("CustomFoods")
+  foodLogs             FoodLog[]
+  favoriteFoods        FavoriteFood[]
+  nutritionGoal        NutritionGoal?
 
   @@index([createdAt])
 }
@@ -895,6 +900,19 @@ model UserStoreItem {
   @@unique([userId, storeItemId])
 }
 
+// Full cosmetic-customization state (themes, accents, ambient effects, Kai
+// looks, chat skins, profile frames / titles / badges). The catalogue itself
+// is static config shared with the frontend (src/data/customization.ts); this
+// row is just what a given user owns and what they have equipped per slot.
+model UserCustomization {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owned     Json     @default("[]") // string[] of catalogue item ids
+  equipped  Json     @default("{}") // Record<slot, itemId>
+  updatedAt DateTime @updatedAt
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // System — notifications, subscription, device sync
 // ─────────────────────────────────────────────────────────────────────────────
@@ -963,6 +981,156 @@ model NutritionEntry {
   createdAt DateTime @default(now())
 
   @@index([userId, date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Food logging & nutrition tracking
+//
+// `Food` rows are a NORMALIZED CACHE of external source records (Open Food Facts,
+// USDA FoodData Central) plus user-authored custom foods. They are kept
+// logically distinct from `FoodLog` (the user's own diary). Provenance
+// (`source`, `sourceId`, `barcode`) is preserved on every cached row. The `Food`
+// table is a lookup cache refreshed from source — not a redistributable dataset.
+// See services/food/* and modules/food.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum FoodSource {
+  open_food_facts
+  usda
+  custom
+}
+
+enum MealType {
+  breakfast
+  lunch
+  dinner
+  snack
+}
+
+/// Normalized, cached food record. Nutrition is stored per-100g/ml unless the
+/// source only published per-serving numbers (`perServingOnly`).
+model Food {
+  id       String     @id @default(cuid())
+  source   FoodSource
+  sourceId String // OFF barcode, USDA fdcId, or a cuid for custom foods
+  barcode  String?
+  name     String
+  brand    String?
+  imageUrl String?
+
+  // the canonical serving the source describes ("1 serving" / "1 container")
+  servingSize  Float?
+  servingUnit  String?
+  servingGrams Float? // grams that serving weighs, when the source says so
+
+  // nutrition, normalized. `dataPer` records the basis.
+  caloriesPer100 Float
+  proteinPer100  Float
+  carbsPer100    Float
+  fatPer100      Float
+  fiberPer100    Float?
+  sugarPer100    Float?
+  sodiumPer100   Float? // milligrams
+
+  micros         Json? // { "<key>": { amount, unit } } — room for micronutrients later
+  perServingOnly Boolean @default(false)
+  dataPer        String  @default("100g") // "100g" | "100ml" | "serving"
+
+  // provenance / attribution
+  ownerId String? // set only when source = custom
+  owner   User?   @relation("CustomFoods", fields: [ownerId], references: [id], onDelete: Cascade)
+  raw     Json? // trimmed source payload, for re-normalization / debugging
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  fetchedAt DateTime @default(now()) // cache freshness
+
+  logs      FoodLog[]
+  favorites FavoriteFood[]
+
+  @@unique([source, sourceId])
+  @@index([barcode])
+  @@index([ownerId])
+}
+
+/// One logged item in a user's food diary. Nutrition is SNAPSHOTTED at log time
+/// so history never shifts if the source food record changes later.
+model FoodLog {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  foodId   String?
+  food     Food?       @relation(fields: [foodId], references: [id], onDelete: SetNull)
+  source   FoodSource? // null for quick-add calorie entries
+  sourceId String?
+
+  foodName String // snapshot
+  brand    String?
+
+  mealType MealType
+
+  quantity    Float  @default(1)
+  servingUnit String @default("serving") // "serving" | "g" | "oz"
+  grams       Float? // resolved grams, when known
+
+  // snapshot of the computed nutrition for this entry
+  calories Float
+  protein  Float
+  carbs    Float
+  fat      Float
+  fiber    Float?
+  sugar    Float?
+  sodium   Float?
+
+  loggedAt  DateTime
+  date      String // "YYYY-MM-DD" local day — cheap day queries
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, date])
+  @@index([userId, loggedAt])
+  @@index([userId, foodId])
+}
+
+model FavoriteFood {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  foodId   String?
+  food     Food?      @relation(fields: [foodId], references: [id], onDelete: Cascade)
+  source   FoodSource
+  sourceId String
+  foodName String
+  brand    String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, source, sourceId])
+  @@index([userId])
+}
+
+/// Per-user daily nutrition targets. User-entered; nothing is medically
+/// prescribed. One row per user.
+model NutritionGoal {
+  userId        String   @id
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dailyCalories Int?
+  proteinGrams  Float?
+  carbGrams     Float?
+  fatGrams      Float?
+  fiberGrams    Float?
+  updatedAt     DateTime @updatedAt
+}
+
+/// Short-lived cache of external text searches so debounced / repeated queries
+/// don't re-hit USDA. Not user data — safe to purge any time.
+model FoodSearchCache {
+  id        String   @id @default(cuid())
+  query     String   @unique
+  results   Json
+  createdAt DateTime @default(now())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
