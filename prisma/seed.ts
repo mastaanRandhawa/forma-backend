@@ -3,6 +3,7 @@ import { hashPassword } from "../src/lib/auth.js";
 import { EQUIPMENT, MUSCLE_GROUPS, EXERCISES } from "../src/data/library.js";
 import { STORE_ITEMS, ACHIEVEMENTS, GOAL_TEMPLATES } from "../src/data/store.js";
 import { BACKGROUND_PRESETS } from "../src/data/appearance.js";
+import { DEFAULT_OWNED, DEFAULT_EQUIPPED } from "../src/data/customization.js";
 
 const prisma = new PrismaClient();
 
@@ -104,11 +105,38 @@ async function main() {
     for (const item of STORE_ITEMS.filter((i) => i.isDefault)) {
       await prisma.userStoreItem.create({ data: { userId: user.id, storeItemId: item.id, equipped: true } });
     }
+    await prisma.userCustomization.create({
+      data: { userId: user.id, owned: DEFAULT_OWNED, equipped: DEFAULT_EQUIPPED },
+    });
     for (const g of GOAL_TEMPLATES) {
       await prisma.goal.create({
         data: { userId: user.id, key: g.key, label: g.label, target: g.target, unit: g.unit, cadence: g.cadence, tone: g.tone },
       });
     }
+    // nutrition — a goal + a custom food + a couple of logged items for today
+    await prisma.nutritionGoal.create({
+      data: { userId: user.id, dailyCalories: 2600, proteinGrams: 175, carbGrams: 280, fatGrams: 80, fiberGrams: 30 },
+    });
+    const oats = await prisma.food.create({
+      data: {
+        source: "custom", sourceId: `custom_seed_oats`, ownerId: user.id,
+        name: "Overnight oats", brand: "homemade",
+        servingSize: 1, servingUnit: "bowl", servingGrams: 320,
+        caloriesPer100: 137, proteinPer100: 5.6, carbsPer100: 20.9, fatPer100: 3.4,
+        fiberPer100: 3.1, sugarPer100: 6.2, sodiumPer100: 40, dataPer: "100g",
+      },
+    });
+    const todayStr = new Date().toISOString().slice(0, 10);
+    await prisma.foodLog.create({
+      data: {
+        userId: user.id, foodId: oats.id, source: "custom", sourceId: oats.sourceId,
+        foodName: oats.name, brand: oats.brand, mealType: "breakfast",
+        quantity: 1, servingUnit: "serving", grams: 320,
+        calories: 438, protein: 17.9, carbs: 66.9, fat: 10.9, fiber: 9.9, sugar: 19.8, sodium: 128,
+        loggedAt: new Date(), date: todayStr,
+      },
+    });
+
     for (const [metricType, value, unit] of [
       ["sleep", 7.3, "h"], ["hrv", 68, "ms"], ["resting_hr", 52, "bpm"],
     ] as const) {
