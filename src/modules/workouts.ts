@@ -224,29 +224,62 @@ workoutsRouter.post(
       equip = owned.map((e) => e.equipment.key);
     }
 
-    const candidates = await prisma.exercise.findMany({
-      where: {
-        slug: { not: exerciseSlug },
-        muscles: { some: { role: "primary", muscleGroup: { key: { in: primaryKeys } } } },
-        ...(equip?.length ? { equipment: { hasSome: equip } } : {}),
-      },
-      include: { muscles: { include: { muscleGroup: true } } },
-    });
+    const [candidates, user, recent] = await Promise.all([
+      prisma.exercise.findMany({
+        where: {
+          slug: { not: exerciseSlug },
+          muscles: { some: { role: "primary", muscleGroup: { key: { in: primaryKeys } } } },
+          ...(equip?.length ? { equipment: { hasSome: equip } } : {}),
+        },
+        include: { muscles: { include: { muscleGroup: true } } },
+      }),
+      prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { experienceLevel: true } }),
+      prisma.exercisePerformance.findMany({
+        where: { session: { userId, status: "completed", startedAt: { gte: new Date(Date.now() - 14 * 86_400_000) } } },
+        select: { exercise: { select: { slug: true } } },
+      }),
+    ]);
 
+    const ceiling = user.experienceLevel ?? "advanced";
+    const rank: Record<string, number> = { beginner: 0, intermediate: 1, advanced: 2 };
+    const recentSlugs = new Set(recent.map((p) => p.exercise.slug));
+
+    // §2.5 — score on: same primary muscle + movement pattern + available
+    // equipment + difficulty ≤ user ceiling + not recently trained.
     const ranked = candidates
       .map((c) => {
         const overlap = c.muscles.filter((m) => m.role === "primary" && primaryKeys.includes(m.muscleGroup.key)).length;
+        const samePattern = !!original.movementPattern && c.movementPattern === original.movementPattern;
+        const withinCeiling = rank[c.difficulty] <= rank[ceiling];
+        const recentlyDone = recentSlugs.has(c.slug);
+
         const reasons: string[] = [`Same primary muscle${overlap > 1 ? "s" : ""}`];
+        if (samePattern) reasons.push("Same movement pattern");
         if (reason === "pain") reasons.push("Lower joint-strain option");
         if (reason === "equipment_unavailable") reasons.push("Uses your available equipment");
         if (reason === "too_hard" && c.difficulty === "beginner") reasons.push("Easier progression");
         if (reason === "too_easy" && c.difficulty === "advanced") reasons.push("Harder variation");
         if (original.alternativeSlugs.includes(c.slug)) reasons.push("Recommended alternative");
+        if (recentlyDone) reasons.push("You trained this in the last 2 weeks");
+
         let score = overlap * 2;
+        if (samePattern) score += 3;
+        if (withinCeiling) score += 1;
+        else score -= 2;
+        if (recentlyDone) score -= 2;
         if (original.alternativeSlugs.includes(c.slug)) score += 3;
         if (reason === "too_hard" && c.difficulty === "beginner") score += 2;
         if (reason === "too_easy" && c.difficulty === "advanced") score += 2;
-        return { slug: c.slug, name: c.name, equipment: c.equipment, difficulty: c.difficulty, reasons, score };
+        return {
+          slug: c.slug,
+          name: c.name,
+          equipment: c.equipment,
+          difficulty: c.difficulty,
+          movementPattern: c.movementPattern,
+          rationale: reasons[0] + (reasons[1] ? ` · ${reasons[1]}` : ""),
+          reasons,
+          score,
+        };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, 6);

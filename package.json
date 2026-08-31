@@ -19,6 +19,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "db:import-repdb": "tsx src/scripts/import-repdb.ts",
     "db:backfill": "tsx src/scripts/backfill.ts",
     "db:reset": "prisma migrate reset --force"
   },
@@ -36,6 +37,7 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
     "yaml": "^2.9.0",
     "zod": "^3.24.1"
   },
@@ -47,6 +49,7 @@
     "@types/morgan": "^1.9.9",
     "@types/node": "^22.10.5",
     "@types/node-cron": "^3.0.11",
+    "@types/nodemailer": "^6.4.17",
     "@types/supertest": "^6.0.3",
     "prisma": "^6.2.1",
     "supertest": "^7.2.2",

@@ -6,6 +6,8 @@ import { env } from "../env.js";
 export interface AccessTokenPayload {
   sub: string;
   email: string;
+  /** Session id — checked against the DB on every request so revocation is enforced. */
+  sid: string;
 }
 
 export const hashPassword = (plain: string) => bcrypt.hash(plain, 12);
@@ -18,10 +20,10 @@ export const verifyAccessToken = (token: string) =>
   jwt.verify(token, env.JWT_ACCESS_SECRET) as AccessTokenPayload & jwt.JwtPayload;
 
 /** Opaque refresh token — the raw value goes to the client, only its hash is stored. */
-export const newRefreshToken = () => {
+export const newRefreshToken = (ttlDays = env.REFRESH_TOKEN_TTL_DAYS) => {
   const raw = crypto.randomBytes(48).toString("base64url");
   const hash = crypto.createHash("sha256").update(raw).digest("hex");
-  const expiresAt = new Date(Date.now() + env.REFRESH_TOKEN_TTL_DAYS * 86_400_000);
+  const expiresAt = new Date(Date.now() + ttlDays * 86_400_000);
   return { raw, hash, expiresAt };
 };
 

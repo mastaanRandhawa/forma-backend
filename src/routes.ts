@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authLimiter, aiLimiter } from "./middleware/rateLimit.js";
+import { requireAuth, requireVerifiedEmail } from "./middleware/auth.js";
 import { authRouter } from "./modules/auth.js";
 import { meRouter } from "./modules/me.js";
 import { trainerRouter } from "./modules/trainer.js";
@@ -18,26 +19,33 @@ import { achievementsRouter } from "./modules/achievements.js";
 import { subscriptionRouter } from "./modules/subscription.js";
 import { docsRouter } from "./modules/docs.js";
 import { configRouter } from "./modules/config.js";
+import { oauthRouter } from "./modules/oauth.js";
 
 export const api = Router();
 
 api.get("/health", (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 api.use("/docs", docsRouter); // GET /docs, /docs/openapi.json, /docs/openapi.yaml
 api.use("/config", configRouter); // GET /config/appearance-presets (auth optional)
+api.use("/oauth", oauthRouter); // GET /oauth/:provider/callback — wearable OAuth (public, state-signed)
 
 api.use("/auth", authLimiter, authRouter);
-api.use("/me", meRouter);
-api.use("/trainer", trainerRouter);
-api.use("/library", libraryRouter);
-api.use("/workouts", workoutsRouter);
-api.use("/programs", programsRouter);
-api.use("/sessions", sessionsRouter);
-api.use("/progress", progressRouter);
-api.use("/goals", goalsRouter);
-api.use("/chat", aiLimiter, chatRouter);
-api.use("/store", storeRouter);
-api.use("/body", bodyRouter);
-api.use("/dashboard", dashboardRouter);
-api.use("/notifications", notificationsRouter);
-api.use("/achievements", achievementsRouter);
-api.use("/subscription", subscriptionRouter);
+
+// Everything below is the application proper: requires a valid session AND a
+// verified email address. `requireAuth` is idempotent, so the modules keeping
+// their own `router.use(requireAuth)` is harmless.
+const app = [requireAuth, requireVerifiedEmail];
+api.use("/me", app, meRouter);
+api.use("/trainer", app, trainerRouter);
+api.use("/library", app, libraryRouter);
+api.use("/workouts", app, workoutsRouter);
+api.use("/programs", app, programsRouter);
+api.use("/sessions", app, sessionsRouter);
+api.use("/progress", app, progressRouter);
+api.use("/goals", app, goalsRouter);
+api.use("/chat", aiLimiter, app, chatRouter);
+api.use("/store", app, storeRouter);
+api.use("/body", app, bodyRouter);
+api.use("/dashboard", app, dashboardRouter);
+api.use("/notifications", app, notificationsRouter);
+api.use("/achievements", app, achievementsRouter);
+api.use("/subscription", app, subscriptionRouter);

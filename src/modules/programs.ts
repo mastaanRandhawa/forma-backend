@@ -82,6 +82,8 @@ programsRouter.post(
       equipmentKeys: z.array(z.string()).optional(),
       name: z.string().optional(),
       activate: z.boolean().default(true),
+      preferredWeekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+      startDate: z.coerce.date().optional(),
     }),
   }),
   asyncHandler(async (req, res) => {
@@ -89,6 +91,7 @@ programsRouter.post(
     const b = req.body as {
       split: keyof typeof SPLITS; daysPerWeek: number; durationWeeks: number;
       sessionLengthMin: number; equipmentKeys?: string[]; name?: string; activate: boolean;
+      preferredWeekdays?: number[]; startDate?: Date;
     };
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     const difficulty = user.experienceLevel ?? "intermediate";
@@ -136,6 +139,8 @@ programsRouter.post(
         durationWeeks: b.durationWeeks,
         generatedBy: "ai_generated",
         active: b.activate,
+        preferredWeekdays: b.preferredWeekdays ?? [],
+        startDate: b.startDate ?? null,
         days: {
           create: Array.from({ length: b.durationWeeks }).flatMap((_, week) =>
             templateDays.map((_, di) => ({
@@ -150,6 +155,91 @@ programsRouter.post(
       include: { days: { include: { workout: true } } },
     });
     res.status(201).json(program);
+  }),
+);
+
+/**
+ * Resolved upcoming sessions with status (§2.4). Uses the program's `startDate`
+ * + `preferredWeekdays` to place each ProgramDay on the calendar, then marks it
+ * completed / missed / scheduled against actually-logged sessions.
+ */
+programsRouter.get(
+  "/:id/schedule",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const program = await prisma.trainingProgram.findFirst({
+      where: { id: req.params.id, userId },
+      include: {
+        days: {
+          include: { workout: { select: { id: true, name: true } } },
+          orderBy: [{ weekIndex: "asc" }, { dayIndex: "asc" }],
+        },
+      },
+    });
+    if (!program) throw notFound("Program not found");
+
+    const trainingDays = program.days.filter((d) => d.workoutId);
+    const workoutIds = [...new Set(trainingDays.map((d) => d.workoutId!))];
+    const sessions = await prisma.workoutSession.findMany({
+      where: { userId, status: "completed", workoutId: { in: workoutIds } },
+      select: { workoutId: true, startedAt: true },
+      orderBy: { startedAt: "asc" },
+    });
+
+    const weekdays = program.preferredWeekdays.length ? [...program.preferredWeekdays].sort((a, b) => a - b) : [1, 3, 5];
+    const anchor = program.startDate ? new Date(program.startDate) : null;
+    const startOfToday = new Date();
+    startOfToday.setUTCHours(0, 0, 0, 0);
+
+    const used = new Set<string>();
+    const resolved = trainingDays.map((d) => {
+      let date: Date | null = null;
+      if (anchor) {
+        const wd = weekdays[d.dayIndex % weekdays.length] ?? weekdays[0]!;
+        const base = new Date(anchor.getTime() + d.weekIndex * 7 * 86_400_000);
+        const shift = (wd - base.getUTCDay() + 7) % 7;
+        date = new Date(base.getTime() + shift * 86_400_000);
+      }
+
+      // match one not-yet-consumed completed session for this day's workout
+      const hit = sessions.find(
+        (s) =>
+          s.workoutId === d.workoutId &&
+          !used.has(s.startedAt.toISOString()) &&
+          (!date || Math.abs(s.startedAt.getTime() - date.getTime()) < 6 * 86_400_000),
+      );
+
+      let status: "scheduled" | "completed" | "missed" | "rescheduled" = d.status;
+      if (hit) {
+        used.add(hit.startedAt.toISOString());
+        status = "completed";
+      } else if (date && date < startOfToday) {
+        status = d.status === "rescheduled" ? "rescheduled" : "missed";
+      } else {
+        status = "scheduled";
+      }
+
+      return {
+        programDayId: d.id,
+        weekIndex: d.weekIndex,
+        dayIndex: d.dayIndex,
+        label: d.label,
+        workoutId: d.workoutId,
+        workoutName: d.workout?.name ?? null,
+        date: (date ?? d.scheduledDate)?.toISOString().slice(0, 10) ?? null,
+        completedAt: hit?.startedAt.toISOString() ?? null,
+        status,
+      };
+    });
+
+    res.json({
+      programId: program.id,
+      startDate: program.startDate?.toISOString().slice(0, 10) ?? null,
+      preferredWeekdays: weekdays,
+      anchored: !!anchor,
+      days: resolved,
+      upcoming: resolved.filter((d) => d.status === "scheduled").slice(0, 8),
+    });
   }),
 );
 

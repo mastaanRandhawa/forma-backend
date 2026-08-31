@@ -436,6 +436,85 @@ paths:
       responses:
         "200":
           content: { application/json: { schema: { $ref: "#/components/schemas/DeviceConnection" } } }
+    delete:
+      tags: [Me]
+      summary: Disconnect a provider (revokes stored OAuth tokens)
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string } }
+      responses: { "204": { description: Disconnected } }
+
+  /me/devices/{provider}/connect:
+    get:
+      tags: [Me]
+      summary: Start a wearable OAuth flow (WHOOP / Oura / Garmin) — §3.3
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [whoop, oura, garmin] } }
+      responses:
+        "200":
+          description: >-
+            Either `{ configured: true, authorizeUrl }` (open it), or
+            `{ configured: false, message }` when the provider's client
+            credentials aren't set on this deployment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  provider: { type: string }
+                  configured: { type: boolean }
+                  authorizeUrl: { type: string }
+                  message: { type: string }
+
+  /me/devices/{provider}/sync:
+    post:
+      tags: [Me]
+      summary: Manually pull the latest metrics from a connected wearable
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string, enum: [whoop, oura, garmin] } }
+      responses:
+        "200":
+          content: { application/json: { schema: { type: object, properties: { ingested: { type: integer } } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /me/health/samples:
+    post:
+      tags: [Me]
+      summary: Batch health-metric ingest from the mobile companion — §3.2 (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, samples]
+              properties:
+                provider: { type: string, enum: [apple_health, health_connect] }
+                samples:
+                  type: array
+                  maxItems: 2000
+                  items:
+                    type: object
+                    required: [type, value, unit]
+                    properties:
+                      type: { type: string, enum: [sleep, hrv, resting_hr, steps] }
+                      value: { type: number }
+                      unit: { type: string }
+                      recordedAt: { type: string, format: date-time }
+                      sourceBundleId: { type: string }
+      responses:
+        "201":
+          content: { application/json: { schema: { type: object, properties: { received: { type: integer }, ingested: { type: integer }, deduped: { type: integer } } } } }
+
+  /oauth/{provider}/callback:
+    get:
+      tags: [Me]
+      summary: Wearable OAuth callback (public, state-signed) — redirects to the web app
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+      responses: { "302": { description: Redirect to WEB_ORIGIN/settings?device_connected|device_error } }
 
   # ──────────────────────────────── Trainer ─────────────────────────────────
   /trainer:
@@ -1278,6 +1357,77 @@ paths:
         "200":
           content: { application/json: { schema: { type: object } } }
 
+  /progress/checkin:
+    get:
+      tags: [Progress]
+      summary: Recent recovery check-ins — §3.1
+      responses:
+        "200":
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/RecoveryCheckin" } } } }
+    post:
+      tags: [Progress]
+      summary: Manual recovery check-in → readiness input — §3.1
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RecoveryCheckinInput" } } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checkin: { $ref: "#/components/schemas/RecoveryCheckin" }
+                  readiness: { $ref: "#/components/schemas/ReadinessBreakdown" }
+
+  /progress/nutrition:
+    get:
+      tags: [Progress]
+      summary: A day's nutrition entries + totals — §5
+      parameters:
+        - { name: date, in: query, schema: { type: string, example: "2026-08-30" } }
+      responses:
+        "200":
+          content: { application/json: { schema: { $ref: "#/components/schemas/NutritionDay" } } }
+    post:
+      tags: [Progress]
+      summary: Log a nutrition item — §5
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/NutritionEntryInput" } } }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entry: { $ref: "#/components/schemas/NutritionEntry" }
+                  totals: { $ref: "#/components/schemas/NutritionTotals" }
+
+  /progress/nutrition/summary:
+    get:
+      tags: [Progress]
+      summary: Per-day nutrition totals for a trend — §5
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 14 } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days: { type: array, items: { $ref: "#/components/schemas/NutritionDayTotals" } }
+
+  /progress/nutrition/{id}:
+    delete:
+      tags: [Progress]
+      summary: Delete a nutrition entry
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses: { "204": { description: Deleted } }
+
   # ────────────────────────────────── Goals ─────────────────────────────────
   /goals:
     get:
@@ -2073,6 +2223,10 @@ components:
         formScoreAvg: { type: number, nullable: true }
         romAvg: { type: number, nullable: true }
         supersetGroup: { type: integer, nullable: true }
+        prescribedWeightKg: { type: number, nullable: true, description: "history-derived target (§2.1)" }
+        prescribedReps: { type: integer, nullable: true }
+        prescribedRpe: { type: number, nullable: true }
+        prescriptionAudit: { allOf: [{ $ref: "#/components/schemas/RecommendationAudit" }], nullable: true }
         exercise: { $ref: "#/components/schemas/Exercise" }
         sets: { type: array, items: { $ref: "#/components/schemas/ExerciseSet" } }
 
@@ -2334,6 +2488,9 @@ components:
         goals: { type: array, items: { $ref: "#/components/schemas/Goal" } }
         notificationsUnread: { type: integer }
         insights: { type: array, items: { $ref: "#/components/schemas/CoachingInsight" } }
+        readinessAvailable: { type: string, enum: [live, unavailable, computed], description: "provenance flag (§5)" }
+        formAvailable: { type: string, enum: [live, unavailable, computed] }
+        volumeSource: { type: string, enum: [computed, unavailable] }
 
     WorkoutSummary:
       type: object
@@ -2342,3 +2499,97 @@ components:
         durationMin: { type: integer, nullable: true }
         exercises: { type: integer }
         muscles: { type: array, items: { type: string } }
+
+    RecoveryCheckinInput:
+      type: object
+      properties:
+        sleepH: { type: number }
+        sleepQuality: { type: integer, minimum: 1, maximum: 5 }
+        fatigue: { type: integer, minimum: 1, maximum: 5 }
+        soreness: { type: integer, minimum: 1, maximum: 5 }
+        note: { type: string }
+        recordedAt: { type: string, format: date-time }
+
+    RecoveryCheckin:
+      allOf:
+        - $ref: "#/components/schemas/RecoveryCheckinInput"
+        - type: object
+          properties:
+            id: { type: string }
+            recordedAt: { type: string, format: date-time }
+
+    NutritionEntryInput:
+      type: object
+      properties:
+        date: { type: string, example: "2026-08-30" }
+        label: { type: string }
+        calories: { type: integer }
+        proteinG: { type: number }
+        carbsG: { type: number }
+        fatG: { type: number }
+        note: { type: string }
+
+    NutritionEntry:
+      allOf:
+        - $ref: "#/components/schemas/NutritionEntryInput"
+        - type: object
+          properties:
+            id: { type: string }
+            date: { type: string }
+            createdAt: { type: string, format: date-time }
+
+    NutritionTotals:
+      type: object
+      properties:
+        calories: { type: integer }
+        proteinG: { type: number }
+        carbsG: { type: number }
+        fatG: { type: number }
+
+    NutritionDayTotals:
+      allOf:
+        - $ref: "#/components/schemas/NutritionTotals"
+        - type: object
+          properties: { date: { type: string } }
+
+    NutritionDay:
+      type: object
+      properties:
+        date: { type: string }
+        entries: { type: array, items: { $ref: "#/components/schemas/NutritionEntry" } }
+        totals: { $ref: "#/components/schemas/NutritionTotals" }
+
+    RecommendationAudit:
+      type: object
+      description: How a deterministic recommendation was reached (§4)
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [prescription, deload, readiness_adjustment, swap] }
+        subjectId: { type: string }
+        inputs: { type: object }
+        rule: { type: string, example: "top_of_range_rpe<=8 → +2.5%" }
+        output: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    ProgramSchedule:
+      type: object
+      description: Resolved upcoming sessions with status (§2.4)
+      properties:
+        programId: { type: string }
+        startDate: { type: string, nullable: true }
+        preferredWeekdays: { type: array, items: { type: integer } }
+        anchored: { type: boolean }
+        days:
+          type: array
+          items:
+            type: object
+            properties:
+              programDayId: { type: string }
+              weekIndex: { type: integer }
+              dayIndex: { type: integer }
+              label: { type: string, nullable: true }
+              workoutId: { type: string, nullable: true }
+              workoutName: { type: string, nullable: true }
+              date: { type: string, nullable: true }
+              completedAt: { type: string, nullable: true }
+              status: { type: string, enum: [scheduled, completed, missed, rescheduled] }

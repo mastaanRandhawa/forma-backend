@@ -41,37 +41,40 @@ type Ex = {
   primary: string[];
   secondary?: string[];
   alternatives?: string[];
+  /** Curated RepDB (repdb.co) match — enriches this row with images/tips/etc.
+   *  on `npm run db:import-repdb`. Omitted where RepDB has no faithful match. */
+  repdbId?: string;
 };
 
 export const EXERCISES: Ex[] = [
   { slug: "barbell-bench-press", name: "Barbell Bench Press", category: "push", movementPattern: "horizontal_press",
-    equipment: ["barbell"], difficulty: "intermediate", camera: true,
+    equipment: ["barbell"], difficulty: "intermediate", camera: true, repdbId: "bench-press",
     primary: ["chest"], secondary: ["triceps", "shoulders"], alternatives: ["incline-dumbbell-press", "cable-fly"] },
   { slug: "incline-dumbbell-press", name: "Incline Dumbbell Press", category: "push", movementPattern: "incline_press",
-    equipment: ["dumbbell"], difficulty: "intermediate", camera: true, primary: ["chest"], secondary: ["shoulders", "triceps"] },
+    equipment: ["dumbbell"], difficulty: "intermediate", camera: true, repdbId: "incline-db-press", primary: ["chest"], secondary: ["shoulders", "triceps"] },
   { slug: "cable-fly", name: "Cable Fly", category: "push", movementPattern: "fly",
-    equipment: ["cable"], difficulty: "beginner", camera: false, primary: ["chest"], secondary: ["shoulders"] },
+    equipment: ["cable"], difficulty: "beginner", camera: false, repdbId: "cable-fly", primary: ["chest"], secondary: ["shoulders"] },
   { slug: "overhead-press", name: "Overhead Press", category: "push", movementPattern: "vertical_press",
-    equipment: ["barbell"], difficulty: "intermediate", camera: true, primary: ["shoulders"], secondary: ["triceps", "traps"] },
+    equipment: ["barbell"], difficulty: "intermediate", camera: true, repdbId: "dumbbell-shoulder-press", primary: ["shoulders"], secondary: ["triceps", "traps"] },
   { slug: "lateral-raise", name: "Lateral Raise", category: "push", movementPattern: "raise",
-    equipment: ["dumbbell"], difficulty: "beginner", camera: false, primary: ["shoulders"] },
+    equipment: ["dumbbell"], difficulty: "beginner", camera: false, repdbId: "lateral-raise", primary: ["shoulders"] },
   { slug: "triceps-rope-pushdown", name: "Triceps Rope Pushdown", category: "push", movementPattern: "extension",
-    equipment: ["cable"], difficulty: "beginner", camera: false, primary: ["triceps"] },
+    equipment: ["cable"], difficulty: "beginner", camera: false, repdbId: "tricep-pushdown", primary: ["triceps"] },
   { slug: "back-squat", name: "Back Squat", category: "legs", movementPattern: "squat",
     equipment: ["barbell"], difficulty: "intermediate", camera: true, primary: ["quads", "glutes"], secondary: ["hamstrings", "abs"],
     alternatives: ["goblet-squat"] },
   { slug: "goblet-squat", name: "Goblet Squat", category: "legs", movementPattern: "squat",
-    equipment: ["dumbbell", "kettlebell"], difficulty: "beginner", camera: true, primary: ["quads", "glutes"], secondary: ["abs"] },
+    equipment: ["dumbbell", "kettlebell"], difficulty: "beginner", camera: true, repdbId: "goblet-squat", primary: ["quads", "glutes"], secondary: ["abs"] },
   { slug: "conventional-deadlift", name: "Conventional Deadlift", category: "pull", movementPattern: "hinge",
-    equipment: ["barbell"], difficulty: "advanced", camera: true, primary: ["back", "glutes", "hamstrings"], secondary: ["traps", "forearms"] },
+    equipment: ["barbell"], difficulty: "advanced", camera: true, repdbId: "deadlift", primary: ["back", "glutes", "hamstrings"], secondary: ["traps", "forearms"] },
   { slug: "romanian-deadlift", name: "Romanian Deadlift", category: "pull", movementPattern: "hinge",
-    equipment: ["barbell"], difficulty: "intermediate", camera: true, primary: ["hamstrings", "glutes"], secondary: ["back"] },
+    equipment: ["barbell"], difficulty: "intermediate", camera: true, repdbId: "romanian-deadlift", primary: ["hamstrings", "glutes"], secondary: ["back"] },
   { slug: "pull-up", name: "Pull-up", category: "pull", movementPattern: "vertical_pull",
-    equipment: ["bodyweight"], difficulty: "intermediate", camera: true, primary: ["lats"], secondary: ["biceps", "rear_delts"] },
+    equipment: ["bodyweight"], difficulty: "intermediate", camera: true, repdbId: "pull-up", primary: ["lats"], secondary: ["biceps", "rear_delts"] },
   { slug: "dumbbell-row", name: "Dumbbell Row", category: "pull", movementPattern: "horizontal_pull",
-    equipment: ["dumbbell"], difficulty: "beginner", camera: true, primary: ["back", "lats"], secondary: ["biceps", "rear_delts"] },
+    equipment: ["dumbbell"], difficulty: "beginner", camera: true, repdbId: "bent-over-db-row", primary: ["back", "lats"], secondary: ["biceps", "rear_delts"] },
   { slug: "bicep-curl", name: "Bicep Curl", category: "pull", movementPattern: "curl",
-    equipment: ["dumbbell"], difficulty: "beginner", camera: false, primary: ["biceps"], secondary: ["forearms"] },
+    equipment: ["dumbbell"], difficulty: "beginner", camera: false, repdbId: "bicep-curl", primary: ["biceps"], secondary: ["forearms"] },
   { slug: "plank", name: "Plank", category: "core", movementPattern: "anti_extension",
-    equipment: ["bodyweight"], difficulty: "beginner", camera: true, primary: ["abs"], secondary: ["obliques"] },
+    equipment: ["bodyweight"], difficulty: "beginner", camera: true, repdbId: "plank", primary: ["abs"], secondary: ["obliques"] },
 ];

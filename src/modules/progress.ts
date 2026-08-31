@@ -53,6 +53,138 @@ progressRouter.post(
   }),
 );
 
+// ── manual recovery check-in (§3.1) → readiness input ──────────────────────
+progressRouter.get("/checkin", asyncHandler(async (req, res) => {
+  res.json(
+    await prisma.recoveryCheckin.findMany({
+      where: { userId: uid(req) },
+      orderBy: { recordedAt: "desc" },
+      take: 30,
+    }),
+  );
+}));
+
+progressRouter.post(
+  "/checkin",
+  validate({
+    body: z.object({
+      sleepH: z.number().min(0).max(24).optional(),
+      sleepQuality: z.number().int().min(1).max(5).optional(),
+      fatigue: z.number().int().min(1).max(5).optional(),
+      soreness: z.number().int().min(1).max(5).optional(),
+      note: z.string().max(500).optional(),
+      recordedAt: z.coerce.date().optional(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const body = req.body as {
+      sleepH?: number; sleepQuality?: number; fatigue?: number; soreness?: number; note?: string; recordedAt?: Date;
+    };
+    const checkin = await prisma.recoveryCheckin.create({ data: { ...body, userId } });
+    res.status(201).json({ checkin, readiness: await readinessFactors(userId) });
+  }),
+);
+
+// ── nutrition daily log (§5) ───────────────────────────────────────────────
+const todayLocal = () => new Date().toISOString().slice(0, 10);
+
+interface NutritionTotals {
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+}
+
+function nutritionTotals(
+  entries: { calories: number | null; proteinG: number | null; carbsG: number | null; fatG: number | null }[],
+): NutritionTotals {
+  return entries.reduce<NutritionTotals>(
+    (t, e) => ({
+      calories: t.calories + (e.calories ?? 0),
+      proteinG: Math.round((t.proteinG + (e.proteinG ?? 0)) * 10) / 10,
+      carbsG: Math.round((t.carbsG + (e.carbsG ?? 0)) * 10) / 10,
+      fatG: Math.round((t.fatG + (e.fatG ?? 0)) * 10) / 10,
+    }),
+    { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
+  );
+}
+
+progressRouter.get(
+  "/nutrition",
+  validate({ query: z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }) }),
+  asyncHandler(async (req, res) => {
+    const date = (req.query as { date?: string }).date ?? todayLocal();
+    const entries = await prisma.nutritionEntry.findMany({
+      where: { userId: uid(req), date },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({ date, entries, totals: nutritionTotals(entries) });
+  }),
+);
+
+/** Last `days` of daily totals — for the nutrition trend on Progress. */
+progressRouter.get(
+  "/nutrition/summary",
+  validate({ query: z.object({ days: z.coerce.number().min(1).max(90).default(14) }) }),
+  asyncHandler(async (req, res) => {
+    const days = Number((req.query as unknown as { days: number }).days);
+    const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const rows = await prisma.nutritionEntry.findMany({
+      where: { userId: uid(req), date: { gte: since } },
+      orderBy: { date: "asc" },
+    });
+    const byDay = new Map<string, typeof rows>();
+    for (const r of rows) byDay.set(r.date, [...(byDay.get(r.date) ?? []), r]);
+    res.json({
+      days: [...byDay.entries()].map(([date, es]) => ({ date, ...nutritionTotals(es) })),
+    });
+  }),
+);
+
+progressRouter.post(
+  "/nutrition",
+  validate({
+    body: z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      label: z.string().max(120).optional(),
+      calories: z.number().int().min(0).max(20000).optional(),
+      proteinG: z.number().min(0).max(2000).optional(),
+      carbsG: z.number().min(0).max(2000).optional(),
+      fatG: z.number().min(0).max(2000).optional(),
+      note: z.string().max(500).optional(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const body = req.body as Record<string, unknown>;
+    const entry = await prisma.nutritionEntry.create({
+      data: { ...body, date: (body.date as string) ?? todayLocal(), userId } as never,
+    });
+    // keep the "protein today" daily goal in step, if the user has one
+    if (entry.proteinG) {
+      const goal = await prisma.goal.findFirst({ where: { userId, key: "protein", active: true } });
+      if (goal) {
+        const periodKey = entry.date;
+        const cur = await prisma.goalEntry.findUnique({ where: { goalId_periodKey: { goalId: goal.id, periodKey } } });
+        const value = (cur?.value ?? 0) + entry.proteinG;
+        await prisma.goalEntry.upsert({
+          where: { goalId_periodKey: { goalId: goal.id, periodKey } },
+          update: { value, completed: value >= goal.target },
+          create: { goalId: goal.id, periodKey, value, completed: value >= goal.target },
+        });
+      }
+    }
+    const dayEntries = await prisma.nutritionEntry.findMany({ where: { userId, date: entry.date } });
+    res.status(201).json({ entry, totals: nutritionTotals(dayEntries) });
+  }),
+);
+
+progressRouter.delete("/nutrition/:id", asyncHandler(async (req, res) => {
+  await prisma.nutritionEntry.deleteMany({ where: { id: req.params.id, userId: uid(req) } });
+  res.status(204).end();
+}));
+
 // ── body measurements ──────────────────────────────────────────────────────
 progressRouter.get("/measurements", asyncHandler(async (req, res) => {
   res.json(await prisma.bodyMeasurement.findMany({ where: { userId: uid(req) }, orderBy: { recordedAt: "asc" } }));
@@ -149,7 +281,7 @@ progressRouter.get(
 // ── volume & consistency detail (P3) ───────────────────────────────────────
 progressRouter.get(
   "/consistency",
-  validate({ query: z.object({ weeks: z.coerce.number().min(1).max(52).default(12) }) }),
+  validate({ query: z.object({ weeks: z.coerce.number().min(1).max(52).default(13) }) }),
   asyncHandler(async (req, res) => {
     const userId = uid(req);
     const weeks = Number((req.query as unknown as { weeks: number }).weeks);
@@ -174,15 +306,31 @@ progressRouter.get(
       .map(([week, v]) => ({ week, sessions: v.sessions, volumeKg: Math.round(v.volumeKg) }))
       .sort((a, b) => a.week.localeCompare(b.week));
 
-    const days = new Set(sessions.map((s) => s.startedAt.toISOString().slice(0, 10)));
+    const dayCounts = new Map<string, number>();
+    for (const s of sessions) {
+      const d = s.startedAt.toISOString().slice(0, 10);
+      dayCounts.set(d, (dayCounts.get(d) ?? 0) + 1);
+    }
+    const days = new Set(dayCounts.keys());
     const target = user.trainingFrequencyTarget ?? 4;
     const adherence = series.length ? series.reduce((a, w) => a + Math.min(1, w.sessions / target), 0) / series.length : 0;
+
+    // per-day grid for the last `weeks` weeks (P3 heatmap) — server-side now that
+    // sessions persist (§5); the web previously derived this from localStore.
+    const gridStart = new Date(Date.now() - weeks * 7 * 86_400_000);
+    gridStart.setUTCHours(0, 0, 0, 0);
+    const grid: { date: string; sessions: number }[] = [];
+    for (let t = gridStart.getTime(); t <= Date.now(); t += 86_400_000) {
+      const key = new Date(t).toISOString().slice(0, 10);
+      grid.push({ date: key, sessions: dayCounts.get(key) ?? 0 });
+    }
 
     res.json({
       target,
       currentStreak: currentStreak(days),
       adherence: Math.round(adherence * 100) / 100,
       weeks: series,
+      days: grid,
     });
   }),
 );

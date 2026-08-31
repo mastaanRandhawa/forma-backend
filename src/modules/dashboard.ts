@@ -2,7 +2,7 @@ import { Router } from "express";
 import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import { computeReadiness } from "../services/readiness.js";
+import { readinessFactors } from "../services/readiness.js";
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -35,7 +35,13 @@ dashboardRouter.get(
     ]);
 
     const weeklyVolume = weekSessions.reduce((a, s) => a + s.totalVolumeKg, 0);
-    const readiness = await computeReadiness(userId);
+    const readinessBreakdown = await readinessFactors(userId);
+    const readiness = readinessBreakdown.score;
+
+    const [everCompleted, formScored] = await Promise.all([
+      prisma.workoutSession.count({ where: { userId, status: "completed" } }),
+      prisma.exerciseSet.count({ where: { formScore: { not: null }, performance: { session: { userId, status: "completed" } } } }),
+    ]);
 
     // streak: consecutive days ending today/yesterday with a completed session
     const recent = await prisma.workoutSession.findMany({
@@ -66,6 +72,10 @@ dashboardRouter.get(
       weeklyVolumeKg: Math.round(weeklyVolume),
       readiness,
       streakDays: streak,
+      // provenance flags (§5) — the web renders "—" instead of a stale/zero value
+      readinessAvailable: readinessBreakdown.hasRecoveryInput ? "live" : "unavailable",
+      formAvailable: formScored > 0 ? "live" : "unavailable",
+      volumeSource: everCompleted > 0 ? "computed" : "unavailable",
       recentPRs: recentPRs.map((p) => ({
         lift: p.exercise.name,
         recordType: p.recordType,

@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import { prisma } from "./prisma.js";
-import { cleanupTokens, purgeDeletedAccounts, dailyNudges, weeklyRollup } from "./jobs/index.js";
+import { cleanupTokens, purgeDeletedAccounts, dailyNudges, weeklyRollup, rescheduleMissedWorkouts, syncWearables } from "./jobs/index.js";
 
 /**
  * Background worker. Run as a separate process:  npm run worker
@@ -20,9 +20,13 @@ const run = (name: string, fn: () => Promise<unknown>) => async () => {
 cron.schedule("0 * * * *", run("cleanupTokens", cleanupTokens));
 cron.schedule("30 3 * * *", run("purgeDeletedAccounts", purgeDeletedAccounts));
 cron.schedule("0 8 * * *", run("dailyNudges", dailyNudges));
+cron.schedule("15 4 * * *", run("rescheduleMissedWorkouts", rescheduleMissedWorkouts));
+cron.schedule("0 */4 * * *", run("syncWearables", syncWearables));
 cron.schedule("0 7 * * 1", run("weeklyRollup", weeklyRollup));
 
-console.log("🕒 Forma worker started — jobs: cleanupTokens, purgeDeletedAccounts, dailyNudges, weeklyRollup");
+console.log(
+  "🕒 Forma worker started — jobs: cleanupTokens, purgeDeletedAccounts, dailyNudges, rescheduleMissedWorkouts, syncWearables, weeklyRollup",
+);
 
 process.on("SIGINT", () => void prisma.$disconnect().then(() => process.exit(0)));
 process.on("SIGTERM", () => void prisma.$disconnect().then(() => process.exit(0)));

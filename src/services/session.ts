@@ -26,6 +26,20 @@ export async function finalizeSession(sessionId: string) {
   const activation = new Map<string, { role: MuscleRole; score: number }>();
   const prWrites: Prisma.PersonalRecordCreateManyInput[] = [];
   const setPrIds: string[] = [];
+  // PersonalRecord.setId is @unique — a set can back at most one PR row. Guard
+  // against the same set being both the top-weight and top-e1RM set, and against
+  // a set already linked by a prior PR (idempotent re-finalize).
+  const claimedSetIds = new Set(
+    (await prisma.personalRecord.findMany({
+      where: { userId: session.userId, setId: { not: null } },
+      select: { setId: true },
+    })).map((p) => p.setId as string),
+  );
+  const claimSetId = (id: string | null): string | undefined => {
+    if (!id || claimedSetIds.has(id)) return undefined;
+    claimedSetIds.add(id);
+    return id;
+  };
 
   for (const perf of session.performances) {
     const working = perf.sets.filter((s) => !s.isWarmup && s.weightKg != null && s.reps != null);
@@ -72,13 +86,16 @@ export async function finalizeSession(sessionId: string) {
     const priorBest = (t: string) => priorPRs.find((p) => p.recordType === t)?.value ?? 0;
 
     if (bestWeight > priorBest("max_weight") && bestWeightSetId) {
+      const linkedSetId = claimSetId(bestWeightSetId);
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_weight",
-        value: bestWeight, previousValue: priorBest("max_weight") || null, setId: bestWeightSetId, sessionId });
-      setPrIds.push(bestWeightSetId);
+        value: bestWeight, previousValue: priorBest("max_weight") || null, setId: linkedSetId, sessionId });
+      if (linkedSetId) setPrIds.push(linkedSetId);
     }
     if (best1RM > priorBest("max_1rm_estimate") && best1RMSetId) {
+      const linkedSetId = claimSetId(best1RMSetId);
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_1rm_estimate",
-        value: best1RM, previousValue: priorBest("max_1rm_estimate") || null, setId: best1RMSetId, sessionId });
+        value: best1RM, previousValue: priorBest("max_1rm_estimate") || null, setId: linkedSetId, sessionId });
+      if (linkedSetId) setPrIds.push(linkedSetId);
     }
     if (exVolume > priorBest("max_volume")) {
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_volume",
