@@ -20,6 +20,8 @@ const exerciseInput = z.object({
   targetWeightKg: z.number().optional(),
   targetRestSec: z.number().int().optional(),
   notes: z.string().optional(),
+  supersetGroup: z.number().int().nullable().optional(),
+  supersetType: z.enum(["straight", "superset", "circuit"]).optional(),
 });
 
 const workoutInput = z.object({
