@@ -44,6 +44,14 @@ const schema = z.object({
   OPEN_FOOD_FACTS_USER_AGENT: z
     .string()
     .default("Forma/1.0 (https://forma.app; nutrition@forma.app)"),
+  // Nutritionix (branded / restaurant / UPC coverage). Both required to enable.
+  NUTRITIONIX_APP_ID: z.string().optional().default(""),
+  NUTRITIONIX_APP_KEY: z.string().optional().default(""),
+  // Edamam Food Database API. Both required to enable; left dark until set.
+  EDAMAM_APP_ID: z.string().optional().default(""),
+  EDAMAM_APP_KEY: z.string().optional().default(""),
+  // Max decoded bytes accepted for a label photo sent to the OCR fallback.
+  FOOD_LABEL_MAX_BYTES: z.coerce.number().default(2_500_000),
   // days a cached Food row is considered fresh before it is re-fetched from source
   FOOD_CACHE_TTL_DAYS: z.coerce.number().default(30),
 });

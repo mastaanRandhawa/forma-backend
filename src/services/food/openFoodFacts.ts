@@ -60,6 +60,19 @@ export async function offLookupBarcode(code: string): Promise<OFFLookup> {
   return { product: null, status: data?.status ?? 0 };
 }
 
+/**
+ * Text search over Open Food Facts. Kept OFF the search-as-you-type hot path
+ * (see module header) — the fallback chain calls this only after USDA misses,
+ * so the volume stays low.
+ */
+export async function offSearch(query: string, pageSize = 20): Promise<Record<string, unknown>[]> {
+  const url =
+    `${BASE}/cgi/search.pl?search_terms=${encodeURIComponent(query)}` +
+    `&search_simple=1&action=process&json=1&page_size=${pageSize}&fields=${FIELDS}`;
+  const data = (await fetchJson(url, 8000)) as { products?: Record<string, unknown>[] };
+  return data.products ?? [];
+}
+
 export const OFF_ATTRIBUTION = {
   name: "Open Food Facts",
   url: "https://world.openfoodfacts.org",

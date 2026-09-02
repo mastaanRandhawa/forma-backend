@@ -8,7 +8,7 @@
  * redesign.
  */
 
-export type FoodSource = "open_food_facts" | "usda" | "custom";
+export type FoodSource = "open_food_facts" | "usda" | "nutritionix" | "edamam" | "custom";
 
 export interface NormalizedFood {
   source: FoodSource;
@@ -226,3 +226,112 @@ export function normalizeUSDA(f: USDAFood): NormalizedFood {
 const nn = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : v);
 const round0 = (n: number) => Math.round(n) || 0;
 const round1 = (n: number) => Math.round(n * 10) / 10 || 0;
+
+// ── Nutritionix ─────────────────────────────────────────────────────────────
+
+interface NutritionixLike {
+  food_name?: string;
+  brand_name?: string;
+  nix_brand_name?: string;
+  nix_item_id?: string;
+  upc?: string;
+  serving_qty?: number;
+  serving_unit?: string;
+  serving_weight_grams?: number;
+  nf_calories?: number;
+  nf_protein?: number;
+  nf_total_carbohydrate?: number;
+  nf_total_fat?: number;
+  nf_dietary_fiber?: number;
+  nf_sugars?: number;
+  nf_sodium?: number;
+  photo?: { thumb?: string };
+}
+
+/**
+ * Nutritionix numbers are per serving. With `serving_weight_grams` we rebase to
+ * per-100 g; otherwise we keep the per-serving figures and set `perServingOnly`.
+ * `sourceId`: branded → `nix_item_id`; common/generic → `common:<food_name>`.
+ */
+export function normalizeNutritionix(f: NutritionixLike): NormalizedFood | null {
+  const name = (f.food_name ?? "").trim();
+  if (!name) return null;
+  const grams = num(f.serving_weight_grams);
+  const scale = grams && grams > 0 ? 100 / grams : 1;
+  const perServingOnly = !(grams && grams > 0);
+  const v = (x: unknown): number => {
+    const raw = num(x);
+    return raw == null ? 0 : round1(raw * scale);
+  };
+  const sodium = num(f.nf_sodium);
+  return {
+    source: "nutritionix",
+    sourceId: f.nix_item_id?.trim() || `${NIX_COMMON_PREFIX}${name.toLowerCase()}`,
+    barcode: (f.upc ?? "").trim() || null,
+    name,
+    brand: (f.brand_name || f.nix_brand_name || "").trim() || null,
+    imageUrl: f.photo?.thumb || null,
+    servingSize: grams ?? num(f.serving_qty),
+    servingUnit: grams ? "g" : f.serving_unit?.trim() || null,
+    servingGrams: grams,
+    caloriesPer100: round0(v(f.nf_calories)),
+    proteinPer100: v(f.nf_protein),
+    carbsPer100: v(f.nf_total_carbohydrate),
+    fatPer100: v(f.nf_total_fat),
+    fiberPer100: f.nf_dietary_fiber == null ? null : v(f.nf_dietary_fiber),
+    sugarPer100: f.nf_sugars == null ? null : v(f.nf_sugars),
+    sodiumPer100: sodium == null ? null : round0(sodium * scale),
+    micros: null,
+    perServingOnly,
+    dataPer: perServingOnly ? "serving" : "100g",
+  };
+}
+
+const NIX_COMMON_PREFIX = "common:";
+
+// ── Edamam ─────────────────────────────────────────────────────────────────
+
+interface EdamamLike {
+  foodId?: string;
+  label?: string;
+  brand?: string;
+  image?: string;
+  nutrients?: {
+    ENERC_KCAL?: number;
+    PROCNT?: number;
+    FAT?: number;
+    CHOCDF?: number;
+    FIBTG?: number;
+    SUGAR?: number;
+    NA?: number;
+  };
+}
+
+/** Edamam parser `nutrients` are already per 100 g. */
+export function normalizeEdamam(f: EdamamLike): NormalizedFood | null {
+  const name = (f.label ?? "").trim();
+  if (!name || !f.foodId) return null;
+  const nut = f.nutrients ?? {};
+  const na = num(nut.NA);
+  return {
+    source: "edamam",
+    sourceId: f.foodId,
+    barcode: null,
+    name,
+    brand: (f.brand ?? "").trim() || null,
+    imageUrl: f.image || null,
+    servingSize: null,
+    servingUnit: null,
+    servingGrams: null,
+    caloriesPer100: round0(num(nut.ENERC_KCAL) ?? 0),
+    proteinPer100: round1(num(nut.PROCNT) ?? 0),
+    carbsPer100: round1(num(nut.CHOCDF) ?? 0),
+    fatPer100: round1(num(nut.FAT) ?? 0),
+    fiberPer100: nn(num(nut.FIBTG)),
+    sugarPer100: nn(num(nut.SUGAR)),
+    sodiumPer100: na == null ? null : round0(na),
+    micros: null,
+    perServingOnly: false,
+    dataPer: "100g",
+  };
+}

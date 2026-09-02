@@ -997,6 +997,8 @@ model NutritionEntry {
 enum FoodSource {
   open_food_facts
   usda
+  nutritionix
+  edamam
   custom
 }
 
