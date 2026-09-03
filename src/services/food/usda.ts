@@ -36,10 +36,33 @@ export interface USDASearchHit {
   dataType?: string;
   brandName?: string;
   brandOwner?: string;
+  gtinUpc?: string;
   servingSize?: number;
   servingSizeUnit?: string;
   householdServingFullText?: string;
   foodNutrients?: { nutrientNumber?: string; number?: string; value?: number; amount?: number }[];
+}
+
+/**
+ * Barcode → the branded USDA item whose GTIN/UPC matches, or null. USDA stores
+ * UPC-A as 12 digits; we compare on the trailing digits so an EAN-13 with a
+ * leading zero still matches.
+ */
+export async function usdaLookupUpc(code: string): Promise<USDASearchHit | null> {
+  if (!usdaConfigured()) throw new FoodSourceError("usda", "unavailable", "USDA_FDC_API_KEY not set");
+  const data = (await fetchJson(`${BASE}/foods/search?api_key=${env.USDA_FDC_API_KEY}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query: code, dataType: ["Branded"], pageSize: 10 }),
+  })) as { foods?: USDASearchHit[] };
+  const digits = code.replace(/\D/g, "");
+  const tail = digits.replace(/^0+/, "");
+  return (
+    (data.foods ?? []).find((f) => {
+      const g = (f.gtinUpc ?? "").replace(/\D/g, "");
+      return g && (g === digits || g.replace(/^0+/, "") === tail);
+    }) ?? null
+  );
 }
 
 export async function usdaSearch(query: string, pageSize = 25): Promise<USDASearchHit[]> {

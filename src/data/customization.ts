@@ -16,7 +16,9 @@ export type CustomizationSlot =
   | "chatTheme"
   | "frame"
   | "title"
-  | "badge";
+  | "badge"
+  | "colorMode"
+  | "font";
 
 export interface CatalogueEntry {
   slot: CustomizationSlot;
@@ -24,28 +26,37 @@ export interface CatalogueEntry {
 }
 
 export const CUSTOMIZATION_CATALOGUE: Record<string, CatalogueEntry> = {
-  // themes
+  // themes — colour worlds, all free, all render in light + dark
   "aurora-plum": { slot: "theme", price: 0 },
   midnight: { slot: "theme", price: 0 },
-  carbon: { slot: "theme", price: 420 },
-  sunset: { slot: "theme", price: 460 },
-  forest: { slot: "theme", price: 440 },
-  arctic: { slot: "theme", price: 720 },
-  synthwave: { slot: "theme", price: 780 },
-  sakura: { slot: "theme", price: 700 },
-  "gold-vault": { slot: "theme", price: 1600 },
-  nebula: { slot: "theme", price: 1500 },
-  terminal: { slot: "theme", price: 1400 },
+  carbon: { slot: "theme", price: 0 },
+  sunset: { slot: "theme", price: 0 },
+  forest: { slot: "theme", price: 0 },
+  arctic: { slot: "theme", price: 0 },
+  synthwave: { slot: "theme", price: 0 },
+  sakura: { slot: "theme", price: 0 },
+  "gold-vault": { slot: "theme", price: 0 },
+  nebula: { slot: "theme", price: 0 },
+  terminal: { slot: "theme", price: 0 },
+  // retired light-only themes — kept so old equipped rows still validate
+  cloud: { slot: "theme", price: 0 },
+  dusk: { slot: "theme", price: 0 },
 
-  // accents
+  // accents — all free
   "ac-brand": { slot: "accent", price: 0 },
-  "ac-ember": { slot: "accent", price: 90 },
-  "ac-cyan": { slot: "accent", price: 90 },
-  "ac-lime": { slot: "accent", price: 120 },
-  "ac-violet": { slot: "accent", price: 120 },
-  "ac-gold": { slot: "accent", price: 200 },
-  "ac-mint": { slot: "accent", price: 120 },
-  "ac-blood": { slot: "accent", price: 160 },
+  "ac-ember": { slot: "accent", price: 0 },
+  "ac-cyan": { slot: "accent", price: 0 },
+  "ac-lime": { slot: "accent", price: 0 },
+  "ac-violet": { slot: "accent", price: 0 },
+  "ac-gold": { slot: "accent", price: 0 },
+  "ac-mint": { slot: "accent", price: 0 },
+  "ac-blood": { slot: "accent", price: 0 },
+  "ac-rose": { slot: "accent", price: 0 },
+  "ac-teal": { slot: "accent", price: 0 },
+  "ac-peach": { slot: "accent", price: 0 },
+  "ac-indigo": { slot: "accent", price: 0 },
+  "ac-forest": { slot: "accent", price: 0 },
+  "ac-amber": { slot: "accent", price: 0 },
 
   // ambient effects
   "fx-auto": { slot: "effect", price: 0 },
@@ -95,6 +106,17 @@ export const CUSTOMIZATION_CATALOGUE: Record<string, CatalogueEntry> = {
   "bd-bolt": { slot: "badge", price: 100 },
   "bd-star": { slot: "badge", price: 200 },
   "bd-diamond": { slot: "badge", price: 500 },
+
+  // color mode (all free)
+  "cm-system": { slot: "colorMode", price: 0 },
+  "cm-dark": { slot: "colorMode", price: 0 },
+  "cm-light": { slot: "colorMode", price: 0 },
+
+  // font packs
+  "fn-system": { slot: "font", price: 0 },
+  "fn-mono": { slot: "font", price: 80 },
+  "fn-rounded": { slot: "font", price: 120 },
+  "fn-serif": { slot: "font", price: 140 },
 };
 
 export const DEFAULT_EQUIPPED: Record<CustomizationSlot, string> = {
@@ -106,6 +128,8 @@ export const DEFAULT_EQUIPPED: Record<CustomizationSlot, string> = {
   frame: "fr-none",
   title: "ti-none",
   badge: "bd-none",
+  colorMode: "cm-system",
+  font: "fn-system",
 };
 
 /** every id that costs nothing — owned implicitly by every user */

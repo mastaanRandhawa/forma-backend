@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBarcode, isPlausibleBarcode, normalizeOFF, normalizeUSDA } from "./normalize.js";
+import {
+  normalizeBarcode,
+  isPlausibleBarcode,
+  normalizeOFF,
+  normalizeUSDA,
+  normalizeNutritionix,
+  normalizeEdamam,
+} from "./normalize.js";
 
 describe("normalizeBarcode", () => {
   it("strips non-digits", () => expect(normalizeBarcode("0 12345 67890 5")).toBe("0012345678905"));
@@ -100,5 +107,78 @@ describe("normalizeUSDA", () => {
       },
     });
     expect(nf).toMatchObject({ perServingOnly: true, dataPer: "serving", servingGrams: 60, brand: "BrandX" });
+  });
+});
+
+describe("normalizeNutritionix", () => {
+  it("rebases per-serving numbers to per-100g when serving grams known", () => {
+    const nf = normalizeNutritionix({
+      food_name: "Greek Yogurt",
+      brand_name: "Chobani",
+      nix_item_id: "abc123",
+      upc: "894700010045",
+      serving_qty: 1,
+      serving_unit: "container",
+      serving_weight_grams: 150,
+      nf_calories: 120,
+      nf_protein: 15,
+      nf_total_carbohydrate: 9,
+      nf_total_fat: 3,
+      nf_sodium: 60,
+    });
+    expect(nf).toMatchObject({
+      source: "nutritionix",
+      sourceId: "abc123",
+      barcode: "894700010045",
+      perServingOnly: false,
+      caloriesPer100: 80, // 120 / 150 * 100
+      proteinPer100: 10,
+    });
+    expect(nf!.sodiumPer100).toBe(40);
+  });
+
+  it("keeps per-serving basis for a common food with no gram weight", () => {
+    const nf = normalizeNutritionix({
+      food_name: "apple",
+      nf_calories: 95,
+      nf_protein: 0.5,
+      nf_total_carbohydrate: 25,
+      nf_total_fat: 0.3,
+    });
+    expect(nf).toMatchObject({
+      source: "nutritionix",
+      sourceId: "common:apple",
+      perServingOnly: true,
+      dataPer: "serving",
+      caloriesPer100: 95,
+    });
+  });
+
+  it("returns null with no name", () => {
+    expect(normalizeNutritionix({ nf_calories: 10 })).toBeNull();
+  });
+});
+
+describe("normalizeEdamam", () => {
+  it("takes parser nutrients as per-100g", () => {
+    const nf = normalizeEdamam({
+      foodId: "food_abc",
+      label: "Brown Rice",
+      nutrients: { ENERC_KCAL: 123, PROCNT: 2.7, CHOCDF: 25.6, FAT: 1, FIBTG: 1.6, NA: 4 },
+    });
+    expect(nf).toMatchObject({
+      source: "edamam",
+      sourceId: "food_abc",
+      dataPer: "100g",
+      perServingOnly: false,
+      caloriesPer100: 123,
+      carbsPer100: 25.6,
+      sodiumPer100: 4,
+    });
+  });
+
+  it("returns null without a foodId or label", () => {
+    expect(normalizeEdamam({ label: "x" })).toBeNull();
+    expect(normalizeEdamam({ foodId: "y" })).toBeNull();
   });
 });

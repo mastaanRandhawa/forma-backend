@@ -29,6 +29,7 @@ enum AuthProvider {
 
 enum Role {
   user
+  coach
   admin
 }
 
@@ -176,6 +177,14 @@ enum SupersetType {
   circuit
 }
 
+enum SetType {
+  standard   // normal weighted set
+  warmup     // explicit warm-up (use isWarmup too)
+  amrap      // as-many-reps-as-possible; reps are open-ended
+  dropset    // drop weight and continue without rest
+  cluster    // short intra-set rest
+}
+
 enum ProgramDayStatus {
   scheduled
   completed
@@ -271,6 +280,9 @@ model User {
   foodLogs             FoodLog[]
   favoriteFoods        FavoriteFood[]
   nutritionGoal        NutritionGoal?
+  kaiMemories          KaiMemory[]
+  coachRelationships   CoachAthlete[]  @relation("CoachRelationships")
+  athleteRelationships CoachAthlete[]  @relation("AthleteRelationships")
 
   @@index([createdAt])
 }
@@ -620,6 +632,7 @@ model ExercisePerformance {
   prescribedWeightKg  Float?
   prescribedReps      Int?
   prescribedRpe       Float?
+  pct1rmTarget        Float?  // e.g. 0.80 = "80% of estimated 1RM"; null = absolute weight
   prescriptionAuditId String?              @unique
   prescriptionAudit   RecommendationAudit? @relation(fields: [prescriptionAuditId], references: [id])
 
@@ -638,6 +651,8 @@ model ExerciseSet {
   rpe              Float?
   restSecondsTaken Int?
   isWarmup         Boolean             @default(false)
+  setType          SetType             @default(standard)
+  amrapRepsLogged  Int?                // actual reps logged on an AMRAP set
   completedAt      DateTime?
   formScore        Float? // camera-tracked only
   romValue         Float?
@@ -997,6 +1012,8 @@ model NutritionEntry {
 enum FoodSource {
   open_food_facts
   usda
+  nutritionix
+  edamam
   custom
 }
 
@@ -1233,4 +1250,45 @@ model UserProgression {
   gatingEnabled    Boolean  @default(true) // false = user chose "show me everything"
   firstRunAt       DateTime @default(now())
   lastEvaluatedAt  DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kai memory (§3.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Structured facts Kai extracts from conversation and sessions.
+/// Injected into the system prompt for relevant future sessions.
+model KaiMemory {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String   // "injury" | "goal" | "pr_pride" | "complaint" | "preference" | "context"
+  subject   String   // normalised key, e.g. "left_shoulder" or "bench_press"
+  content   String   // human-readable sentence injected into prompt
+  score     Float    @default(1.0) // relevance weight, decays over time
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, kind])
+  @@index([userId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coach role (§5.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Opt-in coach–athlete relationship. Athlete approves; coach sees summary data only.
+model CoachAthlete {
+  id         String   @id @default(cuid())
+  coachId    String
+  coach      User     @relation("CoachRelationships", fields: [coachId], references: [id], onDelete: Cascade)
+  athleteId  String
+  athlete    User     @relation("AthleteRelationships", fields: [athleteId], references: [id], onDelete: Cascade)
+  status     String   @default("pending") // "pending" | "active" | "revoked"
+  createdAt  DateTime @default(now())
+  acceptedAt DateTime?
+
+  @@unique([coachId, athleteId])
+  @@index([coachId])
+  @@index([athleteId])
 }

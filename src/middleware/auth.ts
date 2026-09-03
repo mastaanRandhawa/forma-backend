@@ -6,7 +6,7 @@ import { prisma } from "../prisma.js";
 export interface AuthContext {
   userId: string;
   email: string;
-  role: "user" | "admin";
+  role: "user" | "coach" | "admin";
   sessionId: string;
   emailVerified: boolean;
 }

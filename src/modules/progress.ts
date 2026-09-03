@@ -8,6 +8,8 @@ import { notFound } from "../lib/errors.js";
 import { epley1RM } from "../services/session.js";
 import { computeReadiness, readinessFactors } from "../services/readiness.js";
 import { currentStreak } from "../services/achievements.js";
+import { computeTrainingLoad } from "../services/training-load.js";
+import { analyzePatterns } from "../services/patterns.js";
 
 export const progressRouter = Router();
 progressRouter.use(requireAuth);
@@ -438,6 +440,131 @@ progressRouter.get(
       personalRecords: prs.map((p) => ({ lift: p.exercise.name, type: p.recordType, value: p.value, previousValue: p.previousValue, achievedAt: p.achievedAt })),
       bodyMeasurements: measurements,
       muscleLoad: [...muscleLoad.entries()].map(([name, load]) => ({ name, load: Math.round(load * 10) / 10 })).sort((a, b) => b.load - a.load),
+    });
+  }),
+);
+
+// ── training load (CTL/ATL) ──────────────────────────────────────────────────
+progressRouter.get(
+  "/training-load",
+  asyncHandler(async (req, res) => {
+    res.json(await computeTrainingLoad(uid(req)));
+  }),
+);
+
+// ── nutrition–training correlation ───────────────────────────────────────────
+progressRouter.get(
+  "/nutrition-correlation",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const since = new Date(Date.now() - 90 * 86400_000);
+
+    const [sessions, foodLogs] = await Promise.all([
+      prisma.workoutSession.findMany({
+        where: { userId, status: "completed", startedAt: { gte: since } },
+        select: { startedAt: true, totalVolumeKg: true },
+        orderBy: { startedAt: "asc" },
+      }),
+      prisma.foodLog.findMany({
+        where: { userId, loggedAt: { gte: since } },
+        select: { date: true, protein: true, calories: true },
+      }),
+    ]);
+
+    if (sessions.length < 10 || foodLogs.length < 10) {
+      return res.json({ insufficient_data: true, sessionsNeeded: Math.max(0, 10 - sessions.length), logsNeeded: Math.max(0, 10 - foodLogs.length) });
+    }
+
+    // bucket by ISO week
+    const proteinByWeek: Record<string, number[]> = {};
+    for (const l of foodLogs) {
+      const d = new Date(l.date);
+      const k = weekKey(d);
+      (proteinByWeek[k] ??= []).push(l.protein);
+    }
+    const volByWeek: Record<string, number> = {};
+    for (const s of sessions) {
+      const k = weekKey(s.startedAt);
+      volByWeek[k] = (volByWeek[k] ?? 0) + s.totalVolumeKg;
+    }
+
+    const weeks = Object.keys(volByWeek).sort();
+    const pairs = weeks
+      .filter((w) => proteinByWeek[w])
+      .map((w) => ({
+        week: w,
+        avgProteinG: Math.round(proteinByWeek[w].reduce((a, b) => a + b, 0) / proteinByWeek[w].length),
+        totalVolumeKg: Math.round(volByWeek[w]),
+      }));
+
+    // Pearson correlation
+    const n = pairs.length;
+    if (n < 3) return res.json({ insufficient_data: true });
+    const xArr = pairs.map((p) => p.avgProteinG);
+    const yArr = pairs.map((p) => p.totalVolumeKg);
+    const xMean = xArr.reduce((a, b) => a + b, 0) / n;
+    const yMean = yArr.reduce((a, b) => a + b, 0) / n;
+    const num = xArr.reduce((s, x, i) => s + (x - xMean) * (yArr[i] - yMean), 0);
+    const den = Math.sqrt(
+      xArr.reduce((s, x) => s + (x - xMean) ** 2, 0) *
+      yArr.reduce((s, y) => s + (y - yMean) ** 2, 0),
+    );
+    const r = den === 0 ? 0 : num / den;
+
+    res.json({
+      correlation: Math.round(r * 100) / 100,
+      interpretation: r > 0.4 ? "strong positive" : r > 0.1 ? "weak positive" : r < -0.1 ? "inverse" : "no clear correlation",
+      weeks: pairs,
+    });
+  }),
+);
+
+// ── behavioral pattern insights ───────────────────────────────────────────────
+progressRouter.get(
+  "/patterns",
+  asyncHandler(async (req, res) => {
+    const result = await analyzePatterns(uid(req));
+    if (!result) return res.json({ insufficient_data: true, message: "Needs 30+ sessions for pattern analysis." });
+    res.json(result);
+  }),
+);
+
+// ── peer cohort benchmarking ──────────────────────────────────────────────────
+progressRouter.get(
+  "/cohort",
+  validate({ query: z.object({ exercise: z.string(), weightClass: z.coerce.number().optional() }) }),
+  asyncHandler(async (req, res) => {
+    const { exercise, weightClass } = req.query as unknown as { exercise: string; weightClass?: number };
+    const userId = uid(req);
+
+    const userPR = await prisma.personalRecord.findFirst({
+      where: { userId, exercise: { name: exercise }, recordType: "max_1rm_estimate" },
+      orderBy: { value: "desc" },
+    });
+
+    // count users with a PR for this exercise
+    const cohortSize = await prisma.personalRecord.groupBy({
+      by: ["userId"],
+      where: { exercise: { name: exercise }, recordType: "max_1rm_estimate" },
+    }).then((rows) => rows.length);
+
+    if (cohortSize < 50) {
+      return res.json({ insufficient_data: true, cohortSize, message: "Not enough users for this exercise yet." });
+    }
+
+    if (!userPR) return res.json({ no_pr: true });
+
+    const below = await prisma.personalRecord.count({
+      where: { exercise: { name: exercise }, recordType: "max_1rm_estimate", value: { lt: userPR.value }, userId: { not: userId } },
+    });
+    const percentile = Math.round((below / cohortSize) * 100);
+
+    res.json({
+      exercise,
+      yourE1rm: userPR.value,
+      cohortSize,
+      percentile,
+      weightClass: weightClass ?? null,
     });
   }),
 );

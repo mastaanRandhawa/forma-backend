@@ -41,6 +41,10 @@ export const foodRouter = Router();
 foodRouter.use(requireAuth);
 const uid = (req: unknown) => (req as AuthedRequest).userId;
 
+const SOURCES = ["open_food_facts", "usda", "nutritionix", "edamam", "custom"] as const;
+type Source = (typeof SOURCES)[number];
+const sourceEnum = z.enum(SOURCES);
+
 const MEALS: MealType[] = ["breakfast", "lunch", "dinner", "snack"];
 const localDay = (d = new Date()) => {
   const off = d.getTimezoneOffset() * 60_000;
@@ -51,7 +55,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // ── attribution / provenance ───────────────────────────────────────────────
 foodRouter.get("/attribution", (_req, res) => res.json(ATTRIBUTION));
 
-// ── search (USDA-first) ────────────────────────────────────────────────────
+// ── search (chain: customs → USDA → OFF → Nutritionix → Edamam, first hit) ──
 foodRouter.get(
   "/search",
   foodLimiter,
@@ -62,27 +66,55 @@ foodRouter.get(
   }),
 );
 
-// ── barcode lookup (Open Food Facts) ───────────────────────────────────────
-foodRouter.get(
-  "/barcode/:code",
-  foodLimiter,
-  validate({ params: z.object({ code: z.string().min(6).max(20) }) }),
-  asyncHandler(async (req, res) => {
-    const result = await lookupBarcode(req.params.code);
+// ── barcode lookup (fallback chain: DB → USDA → OFF → Nutritionix → Edamam) ──
+//    Optionally accepts a Nutrition-Facts photo (`image`, base64/data-URL) which
+//    is used ONLY when every API tier misses — then it is OCR'd and parsed into
+//    a custom food the user owns. Same endpoint, image param.
+const barcodeQuery = z.object({ code: z.string().min(6).max(20) });
+const barcodeImageBody = z.object({ image: z.string().min(32).max(6_000_000).optional() });
+
+async function handleBarcode(code: string, image: string | undefined, userId: string, res: import("express").Response) {
+  try {
+    const result = await lookupBarcode(code, image ? { image, userId } : {});
     res.json({
       code: result.code,
       status: result.status,
+      via: result.via,
+      degraded: result.degraded,
+      confidence: result.confidence ?? null,
       food: result.food ? withServingOptions(result.food) : null,
     });
+  } catch (e) {
+    if (e instanceof FoodSourceError) throw badRequest(`${e.source} unavailable — try search or a custom food`);
+    throw e;
+  }
+}
+
+foodRouter.get(
+  "/barcode/:code",
+  foodLimiter,
+  validate({ params: barcodeQuery }),
+  asyncHandler(async (req, res) => {
+    await handleBarcode(req.params.code, undefined, uid(req), res);
+  }),
+);
+
+foodRouter.post(
+  "/barcode/:code",
+  foodLimiter,
+  validate({ params: barcodeQuery, body: barcodeImageBody }),
+  asyncHandler(async (req, res) => {
+    const { image } = req.body as z.infer<typeof barcodeImageBody>;
+    await handleBarcode(req.params.code, image, uid(req), res);
   }),
 );
 
 // ── resolve one food (serving screen) ──────────────────────────────────────
 foodRouter.get(
   "/item/:source/:sourceId",
-  validate({ params: z.object({ source: z.enum(["open_food_facts", "usda", "custom"]), sourceId: z.string().min(1) }) }),
+  validate({ params: z.object({ source: sourceEnum, sourceId: z.string().min(1) }) }),
   asyncHandler(async (req, res) => {
-    const { source, sourceId } = req.params as { source: "open_food_facts" | "usda" | "custom"; sourceId: string };
+    const { source, sourceId } = req.params as { source: Source; sourceId: string };
     try {
       const food = await resolveFood(source, sourceId, uid(req));
       if (!food) throw notFound("Food not found");
@@ -244,7 +276,7 @@ foodRouter.get(
 
 const logBody = z.object({
   // referenced food
-  source: z.enum(["open_food_facts", "usda", "custom"]).optional(),
+  source: sourceEnum.optional(),
   sourceId: z.string().min(1).optional(),
   // quick-add (no food)
   quickAdd: z
@@ -300,7 +332,10 @@ foodRouter.post(
         },
       });
     }
-    res.status(201).json({ entry: row, day: await dayView(userId, date) });
+    const day = await dayView(userId, date);
+    res.status(201).json({ entry: row, day });
+    // auto-connect: set protein goal progress to today's total protein
+    void syncProteinGoal(userId, day.totals.protein).catch(() => {});
   }),
 );
 
@@ -398,11 +433,11 @@ foodRouter.get(
 foodRouter.post(
   "/favorites",
   validate({
-    body: z.object({ source: z.enum(["open_food_facts", "usda", "custom"]), sourceId: z.string().min(1) }),
+    body: z.object({ source: sourceEnum, sourceId: z.string().min(1) }),
   }),
   asyncHandler(async (req, res) => {
     const userId = uid(req);
-    const { source, sourceId } = req.body as { source: "open_food_facts" | "usda" | "custom"; sourceId: string };
+    const { source, sourceId } = req.body as { source: Source; sourceId: string };
     const food = await resolveOrThrow(source, sourceId, userId);
     const fav = await prisma.favoriteFood.upsert({
       where: { userId_source_sourceId: { userId, source, sourceId } },
@@ -475,7 +510,7 @@ foodRouter.get(
 );
 
 // ── helpers ────────────────────────────────────────────────────────────────
-async function resolveOrThrow(source: "open_food_facts" | "usda" | "custom", sourceId: string, userId: string) {
+async function resolveOrThrow(source: Source, sourceId: string, userId: string) {
   try {
     const food = await resolveFood(source, sourceId, userId);
     if (food) return food;
@@ -504,3 +539,16 @@ function withServingOptions(food: Food) {
 
 // re-export for warm-cache use elsewhere if needed
 export { cacheFood };
+
+/** Auto-connect: set the user's protein goal progress to today's actual total. */
+async function syncProteinGoal(userId: string, totalProteinG: number): Promise<void> {
+  const goal = await prisma.goal.findFirst({ where: { userId, key: "protein", active: true } });
+  if (!goal) return;
+  const periodKey = new Date().toISOString().slice(0, 10);
+  const value = Math.round(totalProteinG);
+  await prisma.goalEntry.upsert({
+    where: { goalId_periodKey: { goalId: goal.id, periodKey } },
+    update: { value, completed: value >= goal.target },
+    create: { goalId: goal.id, periodKey, value, completed: value >= goal.target },
+  });
+}
