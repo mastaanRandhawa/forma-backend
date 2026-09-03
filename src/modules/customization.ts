@@ -118,7 +118,7 @@ customizationRouter.post(
   "/slot",
   validate({
     body: z.object({
-      slot: z.enum(["theme", "accent", "effect", "avatar", "chatTheme", "frame", "title", "badge"]),
+      slot: z.enum(["theme", "accent", "effect", "avatar", "chatTheme", "frame", "title", "badge", "colorMode", "font"]),
       itemId: z.string().min(1),
     }),
   }),

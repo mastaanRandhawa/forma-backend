@@ -332,7 +332,10 @@ foodRouter.post(
         },
       });
     }
-    res.status(201).json({ entry: row, day: await dayView(userId, date) });
+    const day = await dayView(userId, date);
+    res.status(201).json({ entry: row, day });
+    // auto-connect: set protein goal progress to today's total protein
+    void syncProteinGoal(userId, day.totals.protein).catch(() => {});
   }),
 );
 
@@ -536,3 +539,16 @@ function withServingOptions(food: Food) {
 
 // re-export for warm-cache use elsewhere if needed
 export { cacheFood };
+
+/** Auto-connect: set the user's protein goal progress to today's actual total. */
+async function syncProteinGoal(userId: string, totalProteinG: number): Promise<void> {
+  const goal = await prisma.goal.findFirst({ where: { userId, key: "protein", active: true } });
+  if (!goal) return;
+  const periodKey = new Date().toISOString().slice(0, 10);
+  const value = Math.round(totalProteinG);
+  await prisma.goalEntry.upsert({
+    where: { goalId_periodKey: { goalId: goal.id, periodKey } },
+    update: { value, completed: value >= goal.target },
+    create: { goalId: goal.id, periodKey, value, completed: value >= goal.target },
+  });
+}

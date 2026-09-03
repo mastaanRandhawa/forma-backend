@@ -319,18 +319,59 @@ sessionsRouter.post(
 
     const finalized = await finalizeSession(session.id);
 
-    // post-workout trainer comment (§8.6)
-    const trainer = await prisma.trainer.findUniqueOrThrow({ where: { userId } });
+    // post-workout trainer comment (§8.6) — richer context for better debrief
+    const [trainer, readinessRow] = await Promise.all([
+      prisma.trainer.findUniqueOrThrow({ where: { userId } }),
+      prisma.recoveryCheckin.findFirst({ where: { userId }, orderBy: { recordedAt: "desc" } }),
+    ]);
+
+    // find the exercise with the highest average RPE across its sets (RPE >= 9)
+    const highRpePerf = finalized.performances
+      .map((p) => {
+        const doneSets = p.sets.filter((s) => s.rpe != null && !s.isWarmup);
+        const avgRpe = doneSets.length
+          ? doneSets.reduce((sum, s) => sum + (s.rpe ?? 0), 0) / doneSets.length
+          : 0;
+        return { name: p.exercise?.name ?? "", avgRpe };
+      })
+      .filter((p) => p.avgRpe >= 9)
+      .sort((a, b) => b.avgRpe - a.avgRpe)[0];
+
+    // count sets above/below prescription targets
+    let aboveTargetSets = 0;
+    let belowTargetSets = 0;
+    for (const perf of finalized.performances) {
+      const done = perf.sets.filter((s) => s.reps != null && !s.isWarmup).length;
+      const prescribed = perf.prescribedReps != null ? perf.sets.filter((s) => !s.isWarmup).length : 0;
+      if (prescribed) {
+        if (done > prescribed) aboveTargetSets++;
+        else if (done < prescribed) belowTargetSets++;
+      }
+    }
+
     const comment = await sessionComment(trainer, {
       totalVolumeKg: finalized.totalVolumeKg,
       prCount: finalized.personalRecords.length,
+      prDetails: finalized.personalRecords.map((pr) => `${pr.exercise?.name} ${pr.recordType}`).join(", "),
       exercises: finalized.performances.length,
       durationSeconds: finalized.durationSeconds,
+      readiness: readinessRow
+        ? Math.round(
+            100 -
+              ((readinessRow.fatigue ?? 3) + (readinessRow.soreness ?? 3) - (readinessRow.sleepQuality ?? 3)) * 10,
+          )
+        : null,
+      aboveTargetSets: aboveTargetSets > 0,
+      belowTargetSets: belowTargetSets > 0,
+      highRpeExercise: highRpePerf?.name ?? null,
     }).catch(() => null);
     if (comment) {
       await prisma.workoutSession.update({ where: { id: session.id }, data: { trainerComment: comment } });
       finalized.trainerComment = comment;
     }
+
+    // auto-connect: increment the user's workout-frequency goal by 1
+    void autoIncrementGoal(userId, "workout_frequency").catch(() => {});
 
     // derived-layer follow-ups — best-effort, never block the response.
     // achievements first (they feed progression's prCount / achievementCount).
@@ -356,3 +397,30 @@ sessionsRouter.post("/:id/abandon", asyncHandler(async (req, res) => {
     }),
   );
 }));
+
+/** Increment a goal keyed by `key` by 1 for the current period. Best-effort. */
+async function autoIncrementGoal(userId: string, key: string): Promise<void> {
+  const goal = await prisma.goal.findFirst({ where: { userId, key, active: true } });
+  if (!goal) return;
+  const d = new Date();
+  const periodKey =
+    goal.cadence === "daily"
+      ? d.toISOString().slice(0, 10)
+      : (() => {
+          const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+          const day = t.getUTCDay() || 7;
+          t.setUTCDate(t.getUTCDate() + 4 - day);
+          const ys = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+          const wk = Math.ceil(((t.getTime() - ys.getTime()) / 86_400_000 + 1) / 7);
+          return `${t.getUTCFullYear()}-W${String(wk).padStart(2, "0")}`;
+        })();
+  const existing = await prisma.goalEntry.findUnique({
+    where: { goalId_periodKey: { goalId: goal.id, periodKey } },
+  });
+  const next = (existing?.value ?? 0) + 1;
+  await prisma.goalEntry.upsert({
+    where: { goalId_periodKey: { goalId: goal.id, periodKey } },
+    update: { value: next, completed: next >= goal.target },
+    create: { goalId: goal.id, periodKey, value: next, completed: next >= goal.target },
+  });
+}

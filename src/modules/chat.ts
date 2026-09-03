@@ -6,6 +6,7 @@ import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
 import { trainerReply } from "../services/ai.js";
+import { extractMemories, recallMemories } from "../services/memory.js";
 
 export const chatRouter = Router();
 chatRouter.use(requireAuth);
@@ -27,17 +28,22 @@ chatRouter.get(
 
 /** Shared send path for text (POST /) and voice (POST /voice). */
 async function handleMessage(userId: string, content: string, viaVoice: boolean) {
-  const [trainer, history] = await Promise.all([
+  const [trainer, history, memories] = await Promise.all([
     prisma.trainer.findUniqueOrThrow({ where: { userId } }),
     prisma.chatMessage.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 10 }),
+    recallMemories(userId, 5),
   ]);
 
   const userMessage = await prisma.chatMessage.create({ data: { userId, role: "user", content, viaVoice } });
+
+  // fire-and-forget memory extraction — never block the reply
+  void extractMemories(userId, content).catch(() => {});
 
   const replyText = await trainerReply({
     trainer,
     history: history.reverse().map((m) => ({ role: m.role, content: m.content })),
     userMessage: content,
+    facts: memories.length ? { kaiMemory: memories } : undefined,
   });
 
   const trainerMessage = await prisma.chatMessage.create({
