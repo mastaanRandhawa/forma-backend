@@ -4,6 +4,19 @@ import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
+import { HttpError } from "../lib/errors.js";
+import { isProd } from "../env.js";
+
+/**
+ * Receipts are not verified with Apple / Google yet, so trusting one would hand
+ * out Pro for free. Refuse in production until real verification lands; the
+ * stub stays usable for local development.
+ */
+export function assertReceiptValidationAvailable(prod = isProd): void {
+  if (prod) {
+    throw new HttpError(501, "Receipt validation is not available yet", "receipt_validation_unavailable");
+  }
+}
 
 export const subscriptionRouter = Router();
 subscriptionRouter.use(requireAuth);
@@ -42,6 +55,7 @@ subscriptionRouter.post(
     }),
   }),
   asyncHandler(async (req, res) => {
+    assertReceiptValidationAvailable();
     const userId = uid(req);
     const { store, plan } = req.body as { store: string; receipt: string; plan: string };
     // TODO verify `receipt` with the store's API before trusting it
