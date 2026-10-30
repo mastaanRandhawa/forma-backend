@@ -15,10 +15,8 @@
  */
 
 import { Router } from "express";
-import { z } from "zod";
 import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
-import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, forbidden, badRequest } from "../lib/errors.js";
 

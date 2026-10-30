@@ -82,7 +82,7 @@ export function parseNutritionLabel(raw: string): ParsedLabel {
   if (servingGrams != null && (servingGrams <= 0 || servingGrams > 5000)) servingGrams = null;
 
   const servingText =
-    /serving size\s*[:\-]?\s*([^\n(]+?)(?:\(|\n|$)/i.exec(text)?.[1]?.trim().replace(/\s+/g, " ") || null;
+    /serving size\s*[:-]?\s*([^\n(]+?)(?:\(|\n|$)/i.exec(text)?.[1]?.trim().replace(/\s+/g, " ") || null;
 
   const calories = grab(text, [
     new RegExp(String.raw`calories\s*[:\-]?\s*${NUM}`, "i"),

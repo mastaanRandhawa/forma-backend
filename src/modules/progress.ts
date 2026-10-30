@@ -6,7 +6,7 @@ import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound } from "../lib/errors.js";
 import { epley1RM } from "../services/session.js";
-import { computeReadiness, readinessFactors } from "../services/readiness.js";
+import { readinessFactors } from "../services/readiness.js";
 import { currentStreak } from "../services/achievements.js";
 import { computeTrainingLoad } from "../services/training-load.js";
 import { analyzePatterns } from "../services/patterns.js";

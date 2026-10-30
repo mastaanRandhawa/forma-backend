@@ -351,7 +351,6 @@ export async function searchFoods(rawQuery: string, userId: string): Promise<Sea
   };
 
   // walk the chain, stop at the first tier that returns anything
-  let external: SearchResult[] = [];
   let via: FoodSource | null = null;
   let normalized: NormalizedFood[] = [];
 
@@ -376,7 +375,7 @@ export async function searchFoods(rawQuery: string, userId: string): Promise<Sea
     if (normalized.length) via = "edamam";
   }
 
-  external = normalized.map(toSearchResult);
+  const external: SearchResult[] = normalized.map(toSearchResult);
 
   if (normalized.length) {
     // backfill: warm the Food cache for the top hits + the search cache

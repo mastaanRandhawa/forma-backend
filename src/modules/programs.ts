@@ -209,7 +209,7 @@ programsRouter.get(
           (!date || Math.abs(s.startedAt.getTime() - date.getTime()) < 6 * 86_400_000),
       );
 
-      let status: "scheduled" | "completed" | "missed" | "rescheduled" = d.status;
+      let status: "scheduled" | "completed" | "missed" | "rescheduled";
       if (hit) {
         used.add(hit.startedAt.toISOString());
         status = "completed";

@@ -4,7 +4,12 @@ type NotifType =
   | "trainer_message" | "reminder" | "milestone" | "pr"
   | "check_in" | "weekly_summary" | "feature_unlocked";
 
-const PREF_KEY: Record<NotifType, keyof Awaited<ReturnType<typeof defaultPrefs>>> = {
+/** NotificationPreference columns; a type is sent unless its column is false. */
+type PrefKey =
+  | "workoutReminders" | "restTimerAlerts" | "trainerMessages"
+  | "milestones" | "weeklySummary" | "checkIns";
+
+const PREF_KEY: Record<NotifType, PrefKey> = {
   trainer_message: "trainerMessages",
   reminder: "workoutReminders",
   milestone: "milestones",
@@ -13,13 +18,6 @@ const PREF_KEY: Record<NotifType, keyof Awaited<ReturnType<typeof defaultPrefs>>
   weekly_summary: "weeklySummary",
   feature_unlocked: "milestones",
 };
-
-async function defaultPrefs() {
-  return {
-    workoutReminders: true, restTimerAlerts: true, trainerMessages: true,
-    milestones: true, weeklySummary: true, checkIns: true,
-  };
-}
 
 /**
  * Create a notification row if the user's preferences allow that type.
