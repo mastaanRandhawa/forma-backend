@@ -1,12 +1,18 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../env.js";
 
 /**
- * AI orchestration (§22.7). When ANTHROPIC_API_KEY is unset we return
- * deterministic canned copy so the whole app is usable offline / in dev.
+ * AI orchestration (§22.7). When ANTHROPIC_API_KEY is unset — or a live call
+ * fails — we return canned copy so the app stays usable offline / in dev.
  *
- * Live path: swap the fetch below for the Anthropic SDK. Never send raw video
- * or per-frame pose data here — only computed session facts.
+ * Never send raw video or per-frame pose data here — only computed session facts.
  */
+
+// Built on first live call so the canned path never needs a key. A chat reply
+// sits in the request path, so cap the wait: 30 s per attempt, one retry.
+let client: Anthropic | null = null;
+const anthropic = () =>
+  (client ??= new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 30_000, maxRetries: 1 }));
 
 interface TrainerConfig {
   name: string;
@@ -26,27 +32,40 @@ interface ChatContext {
 export async function trainerReply(ctx: ChatContext): Promise<string> {
   if (!env.ANTHROPIC_API_KEY) return cannedReply(ctx);
 
-  const system = buildSystemPrompt(ctx.trainer, ctx.facts);
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
+  try {
+    const message = await anthropic().messages.create({
       model: env.AI_MODEL,
-      max_tokens: 400,
-      system,
+      // max_tokens covers thinking as well as the answer; the system prompt is
+      // what keeps replies short. Low effort suits chat.
+      max_tokens: 16000,
+      output_config: { effort: "low" },
+      system: buildSystemPrompt(ctx.trainer, ctx.facts),
       messages: [
-        ...ctx.history.map((m) => ({ role: m.role === "trainer" ? "assistant" : "user", content: m.content })),
+        ...ctx.history.map((m): Anthropic.MessageParam => ({
+          role: m.role === "trainer" ? "assistant" : "user",
+          content: m.content,
+        })),
         { role: "user", content: ctx.userMessage },
       ],
-    }),
-  });
-  if (!res.ok) return cannedReply(ctx);
-  const data = (await res.json()) as { content?: { text?: string }[] };
-  return data.content?.[0]?.text?.trim() || cannedReply(ctx);
+    });
+    return replyText(message) || cannedReply(ctx);
+  } catch (err) {
+    console.error("trainer reply failed", err);
+    return cannedReply(ctx);
+  }
+}
+
+/**
+ * The reply's text blocks joined. Thinking blocks are skipped (they can come
+ * first), and a refusal reads as empty so the caller falls back.
+ */
+export function replyText(message: Pick<Anthropic.Message, "content" | "stop_reason">): string {
+  if (message.stop_reason === "refusal") return "";
+  return message.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
 }
 
 export async function sessionComment(
@@ -131,12 +150,13 @@ function buildSystemPrompt(t: TrainerConfig, facts?: Record<string, unknown>) {
     .join(" ");
 }
 
-function cannedReply(ctx: ChatContext): string {
+/**
+ * Offline / failure copy. It must not state facts about the user — it has
+ * none — so it gives general guidance and says the coach is unavailable.
+ */
+export function cannedReply(ctx: ChatContext): string {
   const m = ctx.userMessage.toLowerCase();
-  if (m.includes("today")) return "Based on your plan, today is upper body push. Aim to beat your last top set on the first compound.";
   if (m.includes("shoulder") || m.includes("pain") || m.includes("hurt"))
-    return "Let's play it safe. Drop to a neutral grip, cap RPE at 8, and if it still pinches we swap to a machine press. I've noted it.";
-  if (m.includes("progress") || m.includes("bench")) return "Your bench estimated 1RM is trending up about 12% over the last 8 weeks. Keep the current rep ranges for two more weeks.";
-  if (m.includes("shorter") || m.includes("time")) return "I can trim today to 30 minutes by cutting the accessory work down to one superset. Want me to apply that?";
-  return "Got it. Tell me a bit more and I'll adjust the plan.";
+    return "Play it safe: skip whatever aggravates it today and train around it. If the pain is sharp or still there in a few days, get it checked by a physio or doctor.";
+  return "I can't reach the coaching service right now, so I can't look at your training properly. Your plan and history are still on the Workouts and Progress tabs. Try me again in a bit.";
 }
