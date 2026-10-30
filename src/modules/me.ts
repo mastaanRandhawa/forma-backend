@@ -16,6 +16,7 @@ import { listSessions, revokeSession, revokeAllSessions } from "../services/auth
 import { logAuthEvent } from "../services/audit.js";
 import { issueVerificationToken, consumeVerificationToken } from "../services/verification.js";
 import { sendEmailChangeEmail, sendSecurityAlert } from "../services/mail.js";
+import { buildExportCsv } from "../services/exportCsv.js";
 
 export const meRouter = Router();
 meRouter.use(requireAuth);
@@ -603,9 +604,11 @@ meRouter.put(
   }),
 );
 
-// ── data export ──────────────────────────────────────────────────────────────
+// ── data export (CSV) ────────────────────────────────────────────────────────
+// Its own path: it used to share GET /export with the JSON export above, which
+// Express always matched first, so the CSV was never served.
 meRouter.get(
-  "/export",
+  "/export.csv",
   asyncHandler(async (req, res) => {
     const userId = uid(req);
 
@@ -625,45 +628,7 @@ meRouter.get(
       orderBy: { loggedAt: "asc" },
     });
 
-    const rows: string[] = [];
-
-    // ── workouts CSV ─────────────────────────────────────────────────────────
-    rows.push("## workouts");
-    rows.push("session_date,session_name,exercise,set_number,weight_kg,reps,rpe,warmup,estimated_1rm");
-    for (const s of sessions) {
-      const date = s.startedAt.toISOString().slice(0, 10);
-      for (const perf of s.performances) {
-        let workingSetNum = 0;
-        for (const set of perf.sets) {
-          if (!set.isWarmup) workingSetNum++;
-          const w = set.weightKg ?? "";
-          const reps = set.reps ?? "";
-          const rpe = set.rpe ?? "";
-          const e1rm =
-            set.weightKg && set.reps
-              ? Math.round(set.weightKg * (1 + set.reps / 30))
-              : "";
-          rows.push(
-            `${date},"${s.name}","${perf.exercise.name}",${workingSetNum},${w},${reps},${rpe},${set.isWarmup ? 1 : 0},${e1rm}`,
-          );
-        }
-      }
-    }
-
-    // ── nutrition CSV ─────────────────────────────────────────────────────────
-    rows.push("");
-    rows.push("## nutrition");
-    rows.push("date,meal_type,food_name,brand,calories,protein_g,carbs_g,fat_g,quantity,serving_unit");
-    for (const entry of foodLogs) {
-      const date = entry.loggedAt.toISOString().slice(0, 10);
-      const name = `"${entry.foodName.replace(/"/g, '""')}"`;
-      const brand = `"${(entry.brand ?? "").replace(/"/g, '""')}"`;
-      rows.push(
-        `${date},${entry.mealType},${name},${brand},${entry.calories ?? ""},${entry.protein ?? ""},${entry.carbs ?? ""},${entry.fat ?? ""},${entry.quantity ?? ""},${entry.servingUnit ?? ""}`,
-      );
-    }
-
-    const csv = rows.join("\n");
+    const csv = buildExportCsv(sessions, foodLogs);
     const filename = `forma-export-${new Date().toISOString().slice(0, 10)}.csv`;
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);

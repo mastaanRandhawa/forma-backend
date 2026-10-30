@@ -349,6 +349,15 @@ paths:
           description: Full export
           content: { application/json: { schema: { type: object } } }
 
+  /me/export.csv:
+    get:
+      tags: [Me]
+      summary: Workout sets and food logs as CSV (attachment)
+      responses:
+        "200":
+          description: Two blocks, "## workouts" (one row per set) and "## nutrition" (one row per food log)
+          content: { text/csv: { schema: { type: string } } }
+
   /me/injuries:
     get:
       tags: [Me]
