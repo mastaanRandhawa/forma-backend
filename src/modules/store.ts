@@ -73,19 +73,29 @@ storeRouter.post(
     const item = await prisma.storeItem.findUnique({ where: { id: req.params.id } });
     if (!item) throw notFound("Store item not found");
 
-    const [wallet, existing] = await Promise.all([
-      prisma.wallet.findUniqueOrThrow({ where: { userId } }),
-      prisma.userStoreItem.findUnique({ where: { userId_storeItemId: { userId, storeItemId: item.id } } }),
-    ]);
+    const existing = await prisma.userStoreItem.findUnique({
+      where: { userId_storeItemId: { userId, storeItemId: item.id } },
+    });
     if (existing) throw conflict("Already owned");
-    if (wallet.balance < item.price) throw badRequest("Not enough coins");
 
-    const [, , userItem] = await prisma.$transaction([
-      prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { decrement: item.price } } }),
-      prisma.walletTransaction.create({ data: { walletId: wallet.id, type: "spend", amount: item.price, label: `Bought ${item.name}` } }),
-      prisma.userStoreItem.create({ data: { userId, storeItemId: item.id } }),
-    ]);
-    res.status(201).json({ item: userItem, balance: wallet.balance - item.price });
+    // The decrement only applies while the balance covers the price, so two
+    // concurrent buys can't overdraw; a concurrent buy of the same item hits the
+    // unique (userId, storeItemId) index (409) and rolls back its decrement.
+    const { userItem, balance } = await prisma.$transaction(async (tx) => {
+      const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId } });
+      const spent = await tx.wallet.updateMany({
+        where: { id: wallet.id, balance: { gte: item.price } },
+        data: { balance: { decrement: item.price } },
+      });
+      if (spent.count === 0) throw badRequest("Not enough coins");
+      await tx.walletTransaction.create({
+        data: { walletId: wallet.id, type: "spend", amount: item.price, label: `Bought ${item.name}` },
+      });
+      const userItem = await tx.userStoreItem.create({ data: { userId, storeItemId: item.id } });
+      const after = await tx.wallet.findUniqueOrThrow({ where: { id: wallet.id } });
+      return { userItem, balance: after.balance };
+    });
+    res.status(201).json({ item: userItem, balance });
   }),
 );
 

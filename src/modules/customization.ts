@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../prisma.js";
@@ -16,18 +17,32 @@ export const customizationRouter = Router();
 customizationRouter.use(requireAuth);
 const uid = (req: unknown) => (req as AuthedRequest).userId;
 
-type CzRow = { owned: string[]; equipped: Record<string, string> };
+type CzRow = { owned: string[]; equipped: Record<string, string>; updatedAt: Date };
+type Db = Pick<typeof prisma, "userCustomization">;
+
+/**
+ * Create the row on first touch. Two first requests at once both try to insert;
+ * the loser's unique-key error just means the row now exists.
+ */
+async function ensureRow(userId: string) {
+  await prisma.userCustomization
+    .upsert({
+      where: { userId },
+      create: { userId, owned: DEFAULT_OWNED, equipped: DEFAULT_EQUIPPED },
+      update: {},
+    })
+    .catch((err: unknown) => {
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+    });
+}
 
 /** Load (creating on first touch) and normalise a user's customization row. */
-async function loadRow(userId: string): Promise<CzRow> {
-  const row = await prisma.userCustomization.upsert({
-    where: { userId },
-    create: { userId, owned: DEFAULT_OWNED, equipped: DEFAULT_EQUIPPED },
-    update: {},
-  });
+async function loadRow(userId: string, db: Db = prisma): Promise<CzRow> {
+  await ensureRow(userId);
+  const row = await db.userCustomization.findUniqueOrThrow({ where: { userId } });
   const owned = Array.from(new Set([...(row.owned as string[]), ...DEFAULT_OWNED]));
   const equipped = { ...DEFAULT_EQUIPPED, ...(row.equipped as Record<string, string>) };
-  return { owned, equipped };
+  return { owned, equipped, updatedAt: row.updatedAt };
 }
 
 async function walletBalance(userId: string) {
@@ -53,36 +68,38 @@ customizationRouter.post(
     const entry = CUSTOMIZATION_CATALOGUE[itemId];
     if (!entry) throw notFound("Unknown customization item");
 
-    const [{ owned, equipped }, wallet] = await Promise.all([
-      loadRow(userId),
-      prisma.wallet.findUnique({ where: { userId } }),
-    ]);
-    if (owned.includes(itemId)) throw conflict("Already owned");
-    if (!wallet) throw badRequest("No wallet");
-    if (wallet.balance < entry.price) throw badRequest("Not enough coins");
+    // Two guarded writes in one transaction, so concurrent buys can't spend the
+    // same coins twice: the decrement only applies while the balance covers the
+    // price, and the ownership write only applies if the row hasn't changed since
+    // it was read. Either guard failing rolls the whole purchase back.
+    const result = await prisma.$transaction(async (tx) => {
+      const row = await loadRow(userId, tx);
+      if (row.owned.includes(itemId)) throw conflict("Already owned");
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet) throw badRequest("No wallet");
 
-    const nextOwned = [...owned, itemId];
-    const nextEquipped = { ...equipped, [entry.slot]: itemId };
-
-    await prisma.$transaction([
-      prisma.wallet.update({
-        where: { id: wallet.id },
+      const spent = await tx.wallet.updateMany({
+        where: { id: wallet.id, balance: { gte: entry.price } },
         data: { balance: { decrement: entry.price } },
-      }),
-      prisma.walletTransaction.create({
-        data: { walletId: wallet.id, type: "spend", amount: entry.price, label: `Unlocked ${itemId}` },
-      }),
-      prisma.userCustomization.update({
-        where: { userId },
-        data: { owned: nextOwned, equipped: nextEquipped },
-      }),
-    ]);
+      });
+      if (spent.count === 0) throw badRequest("Not enough coins");
 
-    res.status(201).json({
-      owned: nextOwned,
-      equipped: nextEquipped,
-      balance: wallet.balance - entry.price,
+      const owned = [...row.owned, itemId];
+      const equipped = { ...row.equipped, [entry.slot]: itemId };
+      const saved = await tx.userCustomization.updateMany({
+        where: { userId, updatedAt: row.updatedAt },
+        data: { owned, equipped },
+      });
+      if (saved.count === 0) throw conflict("Customization changed during purchase, try again");
+
+      await tx.walletTransaction.create({
+        data: { walletId: wallet.id, type: "spend", amount: entry.price, label: `Unlocked ${itemId}` },
+      });
+      const after = await tx.wallet.findUniqueOrThrow({ where: { id: wallet.id } });
+      return { owned, equipped, balance: after.balance };
     });
+
+    res.status(201).json(result);
   }),
 );
 
