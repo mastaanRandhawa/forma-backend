@@ -69,8 +69,9 @@ libraryRouter.get(
 libraryRouter.get(
   "/exercises/:slug",
   asyncHandler(async (req, res) => {
-    const exercise = await prisma.exercise.findUnique({
-      where: { slug: req.params.slug },
+    // a RepDB id also finds the native row it enriched (its own slug differs)
+    const exercise = await prisma.exercise.findFirst({
+      where: { OR: [{ slug: req.params.slug }, { externalId: req.params.slug }] },
       include: { muscles: { include: { muscleGroup: true } } },
     });
     if (!exercise) throw notFound("Exercise not found");
