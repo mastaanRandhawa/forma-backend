@@ -7,7 +7,7 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound } from "../lib/errors.js";
 import { epley1RM } from "../services/session.js";
 import { readinessFactors } from "../services/readiness.js";
-import { currentStreak } from "../services/achievements.js";
+import { streakFor } from "../services/economy.js";
 import { computeTrainingLoad } from "../services/training-load.js";
 import { analyzePatterns } from "../services/patterns.js";
 
@@ -313,7 +313,6 @@ progressRouter.get(
       const d = s.startedAt.toISOString().slice(0, 10);
       dayCounts.set(d, (dayCounts.get(d) ?? 0) + 1);
     }
-    const days = new Set(dayCounts.keys());
     const target = user.trainingFrequencyTarget ?? 4;
     const adherence = series.length ? series.reduce((a, w) => a + Math.min(1, w.sessions / target), 0) / series.length : 0;
 
@@ -329,7 +328,7 @@ progressRouter.get(
 
     res.json({
       target,
-      currentStreak: currentStreak(days),
+      currentStreak: await streakFor(uid(req)),
       adherence: Math.round(adherence * 100) / 100,
       weeks: series,
       days: grid,

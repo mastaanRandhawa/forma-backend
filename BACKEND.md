@@ -138,7 +138,13 @@ Full spec + delivery notes: [`docs-appearance-progression.md`](docs-appearance-p
 `GET /` · `POST /` · `POST /:id/log` (set|increment) · `DELETE /:id`
 
 ### Store & wallet — `/store`
-`GET /wallet` · `POST /wallet/earn` · `GET /items?category=` · `POST /items/:id/buy` · `POST /items/:id/equip`
+`GET /wallet` · `GET /items?category=` · `POST /items/:id/buy` · `POST /items/:id/equip`
+`POST /wallet/earn` funds a wallet for tests and doesn't exist in production.
+
+### Coin economy — `/economy` (rules and balance: `docs/COIN_ECONOMY.md` in the web repo)
+`GET /?tz=` (snapshot) · `GET /catalog` (rule table) · `POST /settle` (pay what's owed)
+`POST /buy` · `POST /challenges/:id/reroll` · `POST /streak-repair` · `POST /kai-review`
+Coins are only earned here and in `POST /sessions/:id/finish`. No request carries an amount.
 
 ### Chat — `/chat` (AI rate-limited)
 `GET /?take=&before=` · `POST /` · `POST /voice` (T3) · `DELETE /`

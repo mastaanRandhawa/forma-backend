@@ -227,6 +227,8 @@ model User {
   weightKg         Float? // denormalized from latest BodyMeasurement
   unitPreference   UnitPreference @default(metric)
   weekStartsMonday Boolean        @default(true)
+  /// minutes east of UTC, sent by the browser; sets the user's calendar day for rewards and streaks
+  tzOffsetMin      Int            @default(0)
 
   fitnessGoal             FitnessGoal?
   experienceLevel         ExperienceLevel?
@@ -266,6 +268,9 @@ model User {
   wallet               Wallet?
   ownedStoreItems      UserStoreItem[]
   customization        UserCustomization?
+  inventory            UserInventory[]
+  streakProtections    StreakProtection[]
+  challengeWeeks       ChallengeWeek[]
   notifications        Notification[]
   notificationPrefs    NotificationPreference?
   subscription         Subscription?
@@ -873,6 +878,8 @@ model Wallet {
   userId    String   @unique
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   balance   Int      @default(0)
+  /// every coin ever earned; spending never lowers it. Drives the collector level.
+  lifetimeEarned Int      @default(0)
   updatedAt DateTime @updatedAt
 
   transactions WalletTransaction[]
@@ -885,9 +892,52 @@ model WalletTransaction {
   type      WalletTxnType
   amount    Int
   label     String
+  /// earn rule or spend category ("workout", "streak", "purchase", ...); caps count by this
+  kind      String?
+  /// idempotency key ("workout:<sessionId>", "visit:2026-11-02"): one payout per key, ever
+  key       String?
   createdAt DateTime      @default(now())
 
+  @@unique([walletId, key])
   @@index([walletId, createdAt])
+  @@index([walletId, kind, createdAt])
+}
+
+/// Consumables a user holds (streak freezes, challenge rerolls, Kai reviews).
+model UserInventory {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId    String
+  quantity  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, itemId])
+}
+
+/// A day a freeze or repair covered: it bridges the streak without adding to it.
+model StreakProtection {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date      String // "YYYY-MM-DD" in the user's local day
+  source    String // "freeze" | "repair"
+  createdAt DateTime @default(now())
+
+  @@unique([userId, date])
+}
+
+/// This week's challenge lineup once it has changed. No row means the default rotation.
+model ChallengeWeek {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  week      String // "w2026-11-02", the local Monday
+  slots     String[]
+  /// challenges rerolled away this week, so they don't come back
+  retired   String[] @default([])
+  rerolls   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@id([userId, week])
 }
 
 model StoreItem {

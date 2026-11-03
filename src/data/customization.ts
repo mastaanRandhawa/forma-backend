@@ -18,10 +18,14 @@ export type CustomizationSlot =
   | "title"
   | "badge"
   | "colorMode"
-  | "font";
+  | "font"
+  | "persona"
+  | "restSound"
+  | "celebration";
 
 export interface CatalogueEntry {
-  slot: CustomizationSlot;
+  /** what it equips into; null for an unlock with nothing to wear (a program) */
+  slot: CustomizationSlot | null;
   price: number;
 }
 
@@ -62,21 +66,21 @@ export const CUSTOMIZATION_CATALOGUE: Record<string, CatalogueEntry> = {
   "fx-auto": { slot: "effect", price: 0 },
   "fx-none": { slot: "effect", price: 0 },
   "fx-glow": { slot: "effect", price: 140 },
-  "fx-particles": { slot: "effect", price: 220 },
-  "fx-aurora": { slot: "effect", price: 200 },
+  "fx-particles": { slot: "effect", price: 450 },
+  "fx-aurora": { slot: "effect", price: 400 },
   "fx-grain": { slot: "effect", price: 160 },
-  "fx-scanlines": { slot: "effect", price: 260 },
+  "fx-scanlines": { slot: "effect", price: 600 },
 
   // Kai looks
   "l-signature": { slot: "avatar", price: 0 },
   "l-aurora": { slot: "avatar", price: 150 },
   "l-ember": { slot: "avatar", price: 150 },
   "l-frost": { slot: "avatar", price: 150 },
-  "l-nebula": { slot: "avatar", price: 220 },
-  "l-jade": { slot: "avatar", price: 220 },
-  "l-mono": { slot: "avatar", price: 260 },
-  "l-gold": { slot: "avatar", price: 600 },
-  "l-holo": { slot: "avatar", price: 900 },
+  "l-nebula": { slot: "avatar", price: 450 },
+  "l-jade": { slot: "avatar", price: 450 },
+  "l-mono": { slot: "avatar", price: 500 },
+  "l-gold": { slot: "avatar", price: 1400 },
+  "l-holo": { slot: "avatar", price: 2600 },
 
   // chat skins
   "t-default": { slot: "chatTheme", price: 0 },
@@ -84,28 +88,28 @@ export const CUSTOMIZATION_CATALOGUE: Record<string, CatalogueEntry> = {
   "t-terminal": { slot: "chatTheme", price: 120 },
   "t-paper": { slot: "chatTheme", price: 160 },
   "t-bubblegum": { slot: "chatTheme", price: 160 },
-  "t-ink": { slot: "chatTheme", price: 200 },
+  "t-ink": { slot: "chatTheme", price: 400 },
 
   // profile — frames
   "fr-none": { slot: "frame", price: 0 },
   "fr-ring": { slot: "frame", price: 120 },
-  "fr-laurel": { slot: "frame", price: 300 },
-  "fr-flame": { slot: "frame", price: 350 },
-  "fr-prism": { slot: "frame", price: 700 },
-  "fr-crown": { slot: "frame", price: 1200 },
+  "fr-laurel": { slot: "frame", price: 500 },
+  "fr-flame": { slot: "frame", price: 600 },
+  "fr-prism": { slot: "frame", price: 1400 },
+  "fr-crown": { slot: "frame", price: 3000 },
   // profile — titles
   "ti-none": { slot: "title", price: 0 },
   "ti-earlybird": { slot: "title", price: 150 },
   "ti-ironwilled": { slot: "title", price: 150 },
-  "ti-relentless": { slot: "title", price: 250 },
-  "ti-machine": { slot: "title", price: 250 },
-  "ti-legend": { slot: "title", price: 800 },
+  "ti-relentless": { slot: "title", price: 500 },
+  "ti-machine": { slot: "title", price: 500 },
+  "ti-legend": { slot: "title", price: 1600 },
   // profile — badges
   "bd-none": { slot: "badge", price: 0 },
   "bd-spark": { slot: "badge", price: 100 },
   "bd-bolt": { slot: "badge", price: 100 },
-  "bd-star": { slot: "badge", price: 200 },
-  "bd-diamond": { slot: "badge", price: 500 },
+  "bd-star": { slot: "badge", price: 400 },
+  "bd-diamond": { slot: "badge", price: 1200 },
 
   // color mode (all free)
   "cm-system": { slot: "colorMode", price: 0 },
@@ -117,6 +121,31 @@ export const CUSTOMIZATION_CATALOGUE: Record<string, CatalogueEntry> = {
   "fn-mono": { slot: "font", price: 80 },
   "fn-rounded": { slot: "font", price: 120 },
   "fn-serif": { slot: "font", price: 140 },
+
+  // Kai personas: change how Kai talks in chat and during a workout
+  "ps-kai": { slot: "persona", price: 0 },
+  "ps-drill": { slot: "persona", price: 600 },
+  "ps-zen": { slot: "persona", price: 600 },
+  "ps-analyst": { slot: "persona", price: 600 },
+  "ps-hype": { slot: "persona", price: 600 },
+
+  // rest-timer sounds
+  "rs-chime": { slot: "restSound", price: 0 },
+  "rs-bell": { slot: "restSound", price: 120 },
+  "rs-arcade": { slot: "restSound", price: 180 },
+  "rs-sonar": { slot: "restSound", price: 180 },
+  "rs-bowl": { slot: "restSound", price: 240 },
+
+  // celebrations after a PR, weekly target or streak milestone
+  "cl-confetti": { slot: "celebration", price: 0 },
+  "cl-sparks": { slot: "celebration", price: 200 },
+  "cl-coins": { slot: "celebration", price: 450 },
+  "cl-fireworks": { slot: "celebration", price: 800 },
+
+  // premium programs: unlocks in the plan library
+  "pl-powerbuilding": { slot: null, price: 1500 },
+  "pl-arms": { slot: null, price: 900 },
+  "pl-glutes": { slot: null, price: 900 },
 };
 
 export const DEFAULT_EQUIPPED: Record<CustomizationSlot, string> = {
@@ -130,6 +159,9 @@ export const DEFAULT_EQUIPPED: Record<CustomizationSlot, string> = {
   badge: "bd-none",
   colorMode: "cm-system",
   font: "fn-system",
+  persona: "ps-kai",
+  restSound: "rs-chime",
+  celebration: "cl-confetti",
 };
 
 /** every id that costs nothing — owned implicitly by every user */

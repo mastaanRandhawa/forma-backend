@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { env } from "../env.js";
 import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
@@ -25,24 +26,29 @@ storeRouter.get(
   }),
 );
 
-/** Award coins (called by achievement / goal completion hooks; exposed for tests). */
-export async function awardCoins(userId: string, amount: number, label: string) {
-  const wallet = await prisma.wallet.findUniqueOrThrow({ where: { userId } });
-  await prisma.$transaction([
-    prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } }),
-    prisma.walletTransaction.create({ data: { walletId: wallet.id, type: "earn", amount, label } }),
-  ]);
+/**
+ * Test-only way to fund a wallet. A client must never say how much it earned:
+ * real coins come from `POST /economy/settle` and `POST /sessions/:id/finish`,
+ * which work it out on the server. This route doesn't exist in production.
+ */
+if (env.NODE_ENV !== "production") {
+  storeRouter.post(
+    "/wallet/earn",
+    validate({ body: z.object({ amount: z.number().int().positive().max(10_000), label: z.string().min(1) }) }),
+    asyncHandler(async (req, res) => {
+      const { amount, label } = req.body as { amount: number; label: string };
+      const wallet = await prisma.wallet.findUniqueOrThrow({ where: { userId: uid(req) } });
+      await prisma.$transaction([
+        prisma.wallet.update({
+          where: { id: wallet.id },
+          data: { balance: { increment: amount }, lifetimeEarned: { increment: amount } },
+        }),
+        prisma.walletTransaction.create({ data: { walletId: wallet.id, type: "earn", amount, label, kind: "test" } }),
+      ]);
+      res.json(await prisma.wallet.findUniqueOrThrow({ where: { userId: uid(req) } }));
+    }),
+  );
 }
-
-storeRouter.post(
-  "/wallet/earn",
-  validate({ body: z.object({ amount: z.number().int().positive().max(1000), label: z.string().min(1) }) }),
-  asyncHandler(async (req, res) => {
-    const { amount, label } = req.body as { amount: number; label: string };
-    await awardCoins(uid(req), amount, label);
-    res.json(await prisma.wallet.findUniqueOrThrow({ where: { userId: uid(req) } }));
-  }),
-);
 
 // ── catalogue ──────────────────────────────────────────────────────────────
 storeRouter.get(

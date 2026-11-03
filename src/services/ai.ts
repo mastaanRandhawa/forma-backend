@@ -20,7 +20,16 @@ interface TrainerConfig {
   motivationLevel: number;
   coachingDetail: number;
   humor: number;
+  /** equipped Kai persona (a store item), overriding the tone the sliders set */
+  persona?: string | null;
 }
+
+const PERSONA_VOICE: Record<string, string> = {
+  "ps-drill": "Speak like a drill sergeant: blunt, relentless, short sentences, no excuses accepted. Stay on the user's side and never insult them.",
+  "ps-zen": "Speak like a calm, patient mentor: unhurried and encouraging, with attention to breath, recovery and long-term practice.",
+  "ps-analyst": "Speak like a performance analyst: numbers first, precise and dry. Lead with the data, then the conclusion.",
+  "ps-hype": "Speak like the user's biggest fan: loud, positive and full of energy. Celebrate every win, and keep the advice just as accurate.",
+};
 
 interface ChatContext {
   trainer: TrainerConfig;
@@ -85,6 +94,34 @@ export async function sessionComment(
   });
 }
 
+/**
+ * Kai's written take for a Deep Review, or null when the AI service isn't
+ * configured or doesn't answer. The review stands on its own numbers without it.
+ */
+export async function reviewTake(trainer: TrainerConfig, facts: Record<string, unknown>): Promise<string | null> {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  try {
+    const message = await anthropic().messages.create({
+      model: env.AI_MODEL,
+      max_tokens: 16000,
+      output_config: { effort: "low" },
+      system: buildSystemPrompt(trainer, facts),
+      messages: [
+        {
+          role: "user",
+          content:
+            "Write a 3–4 sentence honest read of my last 28 days of training using only the facts. " +
+            "Say what's working, what's holding me back, and what to change first.",
+        },
+      ],
+    });
+    return replyText(message) || null;
+  } catch (err) {
+    console.error("review take failed", err);
+    return null;
+  }
+}
+
 function cannedDebrief(facts: Record<string, unknown>): string {
   const vol = facts.totalVolumeKg ? `${Math.round(Number(facts.totalVolumeKg))} kg` : null;
   const prs = Number(facts.prCount ?? 0);
@@ -136,6 +173,7 @@ function buildSystemPrompt(t: TrainerConfig, facts?: Record<string, unknown>) {
 
   return [
     `You are ${t.name}, a personal trainer inside the Forma app. Your tone is ${tone}.`,
+    t.persona ? PERSONA_VOICE[t.persona] ?? "" : "",
     detail,
     t.humor > 0.6 ? "A little humour is fine." : "",
     "Only discuss training, recovery, nutrition basics, and the user's data. Refuse medical diagnosis.",

@@ -93,6 +93,7 @@ async function main() {
       data: {
         userId: user.id,
         balance: 720,
+        lifetimeEarned: 720,
         transactions: {
           create: [
             { type: "earn", amount: 60, label: "5-workout week" },

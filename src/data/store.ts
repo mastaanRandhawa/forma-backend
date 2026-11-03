@@ -23,7 +23,7 @@ export const STORE_ITEMS: Prisma.StoreItemCreateInput[] = [
   { id: "l-aurora", category: "look", name: "Aurora", detail: "pink into cyan", price: 150, swatch: "linear-gradient(135deg,#D51A7A,#4D7CFF,#83E9F4)" },
   { id: "l-ember", category: "look", name: "Ember", detail: "coral and amber", price: 150, swatch: "linear-gradient(135deg,#FF6B4A,#FFB661)" },
   { id: "l-frost", category: "look", name: "Frost", detail: "cool blue-white", price: 150, swatch: "linear-gradient(135deg,#83E9F4,#4D7CFF)" },
-  { id: "l-nebula", category: "look", name: "Nebula", detail: "violet and wine", price: 220, swatch: "linear-gradient(135deg,#7F60FF,#7A174F)" },
+  { id: "l-nebula", category: "look", name: "Nebula", detail: "violet and wine", price: 450, swatch: "linear-gradient(135deg,#7F60FF,#7A174F)" },
 
   // chat themes
   { id: "t-default", category: "theme", name: "Default", detail: "soft frosted bubbles", price: 0, isDefault: true },

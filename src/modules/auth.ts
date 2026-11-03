@@ -13,6 +13,7 @@ import { randomToken, sha256 } from "../lib/crypto.js";
 import { badRequestCode, conflict, locked, unauthorized } from "../lib/errors.js";
 import { isProd } from "../env.js";
 import { STORE_ITEMS, GOAL_TEMPLATES } from "../data/store.js";
+import { WELCOME_COINS } from "../data/economy.js";
 import { verifySocialToken } from "../services/social-auth.js";
 import {
   issueSession,
@@ -70,7 +71,16 @@ const loginSchema = z.object({
 // ── new-account bootstrap (trainer / wallet / prefs / goals / default items) ──
 export async function bootstrapUser(userId: string) {
   await prisma.trainer.create({ data: { userId } });
-  await prisma.wallet.create({ data: { userId, balance: 100 } });
+  await prisma.wallet.create({
+    data: {
+      userId,
+      balance: WELCOME_COINS,
+      lifetimeEarned: WELCOME_COINS,
+      transactions: {
+        create: { type: "earn", amount: WELCOME_COINS, label: "Welcome to Forma", kind: "welcome", key: "welcome" },
+      },
+    },
+  });
   await prisma.notificationPreference.create({ data: { userId } });
   await prisma.subscription.create({ data: { userId } });
   await prisma.userAppearance.create({ data: { userId } });

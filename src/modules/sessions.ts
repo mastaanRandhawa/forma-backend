@@ -7,6 +7,8 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
 import { finalizeSession } from "../services/session.js";
 import { evaluateAchievements } from "../services/achievements.js";
+import { clockForUser, economySnapshot, personaFor, settle, settleWorkout } from "../services/economy.js";
+import type { Reward } from "../services/wallet.js";
 import { generateInsights } from "../services/insights.js";
 import { evaluateProgression } from "../services/progression.js";
 import { sessionComment } from "../services/ai.js";
@@ -311,7 +313,11 @@ sessionsRouter.post(
   asyncHandler(async (req, res) => {
     const userId = uid(req);
     const session = await ownSession(userId, req.params.id);
-    if (session.status === "completed") return res.json(await finalizeSession(session.id));
+    if (session.status === "completed") {
+      // a retried finish: finalizing and paying are both idempotent
+      const again = await finalizeSession(session.id);
+      return res.json(Object.assign(again, { economy: await payForSession(userId, again, []) }));
+    }
     const { durationSeconds, caloriesEstimate } = req.body as { durationSeconds?: number; caloriesEstimate?: number };
     if (durationSeconds || caloriesEstimate) {
       await prisma.workoutSession.update({ where: { id: session.id }, data: { durationSeconds, caloriesEstimate } });
@@ -320,9 +326,10 @@ sessionsRouter.post(
     const finalized = await finalizeSession(session.id);
 
     // post-workout trainer comment (§8.6) — richer context for better debrief
-    const [trainer, readinessRow] = await Promise.all([
+    const [trainer, readinessRow, persona] = await Promise.all([
       prisma.trainer.findUniqueOrThrow({ where: { userId } }),
       prisma.recoveryCheckin.findFirst({ where: { userId }, orderBy: { recordedAt: "desc" } }),
+      personaFor(userId),
     ]);
 
     // find the exercise with the highest average RPE across its sets (RPE >= 9)
@@ -349,7 +356,7 @@ sessionsRouter.post(
       }
     }
 
-    const comment = await sessionComment(trainer, {
+    const comment = await sessionComment({ ...trainer, persona }, {
       totalVolumeKg: finalized.totalVolumeKg,
       prCount: finalized.personalRecords.length,
       prDetails: finalized.personalRecords.map((pr) => `${pr.exercise?.name} ${pr.recordType}`).join(", "),
@@ -381,10 +388,15 @@ sessionsRouter.post(
         notify(userId, "pr", "New personal record", `${pr.exercise.name} — ${pr.recordType.replace(/_/g, " ")}`, "/progress"),
       ),
     ]);
-    await evaluateAchievements(userId).catch(() => {});
+    const unlocked = await evaluateAchievements(userId).catch(() => []);
+    // never let a reward hiccup fail a workout that has already been saved
+    const economy = await payForSession(userId, finalized, unlocked).catch((err: unknown) => {
+      console.error("session rewards failed", err);
+      return null;
+    });
     const progression = await evaluateProgression(userId).catch(() => null);
 
-    res.json(Object.assign(finalized, { progression }));
+    res.json(Object.assign(finalized, { progression, economy }));
   }),
 );
 
@@ -397,6 +409,23 @@ sessionsRouter.post("/:id/abandon", asyncHandler(async (req, res) => {
     }),
   );
 }));
+
+/** Pay a finished session, then anything else it made due (weekly target, challenges, streak). */
+async function payForSession(
+  userId: string,
+  session: Awaited<ReturnType<typeof finalizeSession>>,
+  alreadyPaid: Reward[],
+) {
+  const clock = await clockForUser(userId);
+  const { rewards, skipped } = await settleWorkout(userId, session, clock);
+  const settled = await settle(userId, clock);
+  return {
+    rewards: [...rewards, ...settled.rewards, ...alreadyPaid],
+    skipped,
+    events: settled.events,
+    snapshot: await economySnapshot(userId, clock),
+  };
+}
 
 /** Increment a goal keyed by `key` by 1 for the current period. Best-effort. */
 async function autoIncrementGoal(userId: string, key: string): Promise<void> {

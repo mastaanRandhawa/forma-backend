@@ -7,6 +7,7 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
 import { trainerReply } from "../services/ai.js";
 import { extractMemories, recallMemories } from "../services/memory.js";
+import { personaFor } from "../services/economy.js";
 
 export const chatRouter = Router();
 chatRouter.use(requireAuth);
@@ -28,10 +29,11 @@ chatRouter.get(
 
 /** Shared send path for text (POST /) and voice (POST /voice). */
 async function handleMessage(userId: string, content: string, viaVoice: boolean) {
-  const [trainer, history, memories] = await Promise.all([
+  const [trainer, history, memories, persona] = await Promise.all([
     prisma.trainer.findUniqueOrThrow({ where: { userId } }),
     prisma.chatMessage.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 10 }),
     recallMemories(userId, 5),
+    personaFor(userId),
   ]);
 
   const userMessage = await prisma.chatMessage.create({ data: { userId, role: "user", content, viaVoice } });
@@ -40,7 +42,7 @@ async function handleMessage(userId: string, content: string, viaVoice: boolean)
   void extractMemories(userId, content).catch(() => {});
 
   const replyText = await trainerReply({
-    trainer,
+    trainer: { ...trainer, persona },
     history: history.reverse().map((m) => ({ role: m.role, content: m.content })),
     userMessage: content,
     facts: memories.length ? { kaiMemory: memories } : undefined,

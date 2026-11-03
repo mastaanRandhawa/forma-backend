@@ -1512,7 +1512,7 @@ paths:
   /store/wallet/earn:
     post:
       tags: [Store]
-      summary: Award coins (also fired automatically by achievements)
+      summary: Fund a wallet for tests. Not available in production
       requestBody:
         required: true
         content:
@@ -1521,11 +1521,89 @@ paths:
               type: object
               required: [amount, label]
               properties:
-                amount: { type: integer, minimum: 1, maximum: 1000 }
+                amount: { type: integer, minimum: 1, maximum: 10000 }
                 label: { type: string }
       responses:
         "200":
           content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
+
+  /economy:
+    get:
+      tags: [Store]
+      summary: "Everything the store shows: wallet, inventory, streak, challenges, deals and caps"
+      parameters:
+        - { name: tz, in: query, description: "Minutes east of UTC", schema: { type: integer, minimum: -720, maximum: 840 } }
+      responses:
+        "200": { description: Economy snapshot }
+
+  /economy/catalog:
+    get:
+      tags: [Store]
+      summary: The full rule table, which the client's copy has to match
+      responses:
+        "200": { description: Prices, caps and earn rules }
+
+  /economy/settle:
+    post:
+      tags: [Store]
+      summary: Pay whatever is owed. The server works it out; no request carries an amount
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tzOffsetMin: { type: integer, minimum: -720, maximum: 840 }
+      responses:
+        "200": { description: "Rewards paid, events (such as a streak freeze being used) and the snapshot" }
+
+  /economy/buy:
+    post:
+      tags: [Store]
+      summary: Buy a cosmetic, consumable, program or bundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [itemId]
+              properties:
+                itemId: { type: string }
+                expectedPrice: { type: integer, description: "Rejected with 409 if it no longer matches" }
+      responses:
+        "201": { description: Purchased }
+        "400": { description: Not enough coins }
+        "404": { description: Unknown item }
+        "409": { description: "Already owned, at the hold limit, or the price changed" }
+
+  /economy/challenges/{id}/reroll:
+    post:
+      tags: [Store]
+      summary: Spend a reroll to swap an unfinished weekly challenge
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: The updated snapshot }
+        "400": { description: No reroll in the kit }
+        "409": { description: "Already done, or no rerolls left this week" }
+
+  /economy/streak-repair:
+    post:
+      tags: [Store]
+      summary: Charge for and apply a streak repair, only when one can be applied
+      responses:
+        "200": { description: Repaired }
+        "400": { description: Not enough coins }
+        "409": { description: "Nothing to repair, or already repaired this week" }
+
+  /economy/kai-review:
+    post:
+      tags: [Store]
+      summary: Spend a Kai Deep Review. The report is also saved to the chat
+      responses:
+        "200": { description: The review and the snapshot }
+        "400": { description: No review in the kit }
 
   /store/items:
     get:

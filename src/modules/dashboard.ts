@@ -3,6 +3,7 @@ import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { readinessFactors } from "../services/readiness.js";
+import { streakFor } from "../services/economy.js";
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
@@ -43,20 +44,8 @@ dashboardRouter.get(
       prisma.exerciseSet.count({ where: { formScore: { not: null }, performance: { session: { userId, status: "completed" } } } }),
     ]);
 
-    // streak: consecutive days ending today/yesterday with a completed session
-    const recent = await prisma.workoutSession.findMany({
-      where: { userId, status: "completed" },
-      orderBy: { startedAt: "desc" },
-      take: 60,
-      select: { startedAt: true },
-    });
-    const days = new Set(recent.map((s) => s.startedAt.toISOString().slice(0, 10)));
-    let streak = 0;
-    for (let i = 0; i < 60; i++) {
-      const d = new Date(now.getTime() - i * 86_400_000).toISOString().slice(0, 10);
-      if (days.has(d)) streak++;
-      else if (i > 0) break;
-    }
+    // applies any streak freeze that's now due, so the number shown is the protected one
+    const streak = await streakFor(userId);
 
     res.json({
       greeting: dayPart(now),

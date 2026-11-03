@@ -2,7 +2,7 @@ import { prisma } from "../prisma.js";
 import { notify } from "../services/notify.js";
 import { generateInsights } from "../services/insights.js";
 import { evaluateAchievements } from "../services/achievements.js";
-import { currentStreak } from "../services/achievements.js";
+import { localDay, shiftDay, streakDays, streakLength } from "../services/streak.js";
 import { syncConnection, WEARABLE_PROVIDERS } from "../services/wearables.js";
 
 /** Purge expired / revoked refresh + reset tokens. Runs hourly. */
@@ -43,16 +43,10 @@ export async function dailyNudges() {
     }
 
     // streak-break warning
-    const recent = await prisma.workoutSession.findMany({
-      where: { userId: u.id, status: "completed" },
-      orderBy: { startedAt: "desc" },
-      take: 30,
-      select: { startedAt: true },
-    });
-    const days = new Set(recent.map((s) => s.startedAt.toISOString().slice(0, 10)));
-    const streak = currentStreak(days);
-    const yesterday = new Date(today - 86_400_000).toISOString().slice(0, 10);
-    if (streak >= 3 && days.has(yesterday) && !doneToday) {
+    const { trained, protectedDays } = await streakDays(u.id, u.tzOffsetMin);
+    const localToday = localDay(new Date(), u.tzOffsetMin);
+    const streak = streakLength(trained, protectedDays, localToday);
+    if (streak >= 3 && trained.has(shiftDay(localToday, -1)) && !doneToday) {
       await notify(u.id, "reminder", `Keep your ${streak}-day streak`, "A quick session today keeps it alive.", "/workouts").catch(() => {});
     }
   }
