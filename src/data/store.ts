@@ -46,12 +46,12 @@ export const ACHIEVEMENTS: Prisma.AchievementCreateInput[] = [
   { key: "first-wearable",    title: "Wired up",            detail: "Connect a wearable device",                        icon: "watch" },
 
   // ── streaks ────────────────────────────────────────────────────────────────
-  { key: "streak-3",   title: "Hat trick",         detail: "Train 3 days in a row",   icon: "flame", targetValue: 3   },
-  { key: "streak-7",   title: "One full week",     detail: "Train 7 days in a row",   icon: "flame", targetValue: 7   },
-  { key: "streak-14",  title: "Two weeks straight",detail: "Train 14 days in a row",  icon: "flame", targetValue: 14  },
-  { key: "streak-30",  title: "A month of iron",   detail: "Train 30 days in a row",  icon: "flame", targetValue: 30  },
-  { key: "streak-60",  title: "Two month warrior", detail: "Train 60 days in a row",  icon: "flame", targetValue: 60  },
-  { key: "streak-90",  title: "Quarter-year grind",detail: "Train 90 days in a row",  icon: "flame", targetValue: 90  },
+  { key: "streak-3",   title: "Hat trick",         detail: "Reach a 3-day streak",    icon: "flame", targetValue: 3   },
+  { key: "streak-7",   title: "One full week",     detail: "Reach a 7-day streak",    icon: "flame", targetValue: 7   },
+  { key: "streak-14",  title: "Two weeks straight",detail: "Reach a 14-day streak",   icon: "flame", targetValue: 14  },
+  { key: "streak-30",  title: "A month of iron",   detail: "Reach a 30-day streak",   icon: "flame", targetValue: 30  },
+  { key: "streak-60",  title: "Two month warrior", detail: "Reach a 60-day streak",   icon: "flame", targetValue: 60  },
+  { key: "streak-90",  title: "Quarter-year grind",detail: "Reach a 90-day streak",   icon: "flame", targetValue: 90  },
 
   // ── session count ──────────────────────────────────────────────────────────
   { key: "sessions-10",   title: "Getting started",   detail: "Complete 10 workouts",   icon: "dumbbell", targetValue: 10  },

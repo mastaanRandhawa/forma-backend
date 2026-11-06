@@ -17,6 +17,7 @@ import { logAuthEvent } from "../services/audit.js";
 import { issueVerificationToken, consumeVerificationToken } from "../services/verification.js";
 import { sendEmailChangeEmail, sendSecurityAlert } from "../services/mail.js";
 import { buildExportCsv } from "../services/exportCsv.js";
+import { holdStreakForTarget } from "../services/economy.js";
 
 export const meRouter = Router();
 meRouter.use(requireAuth);
@@ -72,6 +73,7 @@ meRouter.patch(
   "/",
   validate({ body: profileSchema }),
   asyncHandler(async (req, res) => {
+    await holdStreakForTarget(uid(req), (req.body as z.infer<typeof profileSchema>).trainingFrequencyTarget);
     const user = await prisma.user.update({ where: { id: uid(req) }, data: req.body });
     const { passwordHash, appleSub, googleSub, ...safe } = user;
     res.json(safe);
@@ -334,6 +336,7 @@ meRouter.post(
     const userId = uid(req);
     const calmMode = experience?.calmMode ?? false;
 
+    await holdStreakForTarget(userId, profile.trainingFrequencyTarget);
     await prisma.$transaction(async (tx) => {
       await tx.user.update({ where: { id: userId }, data: { ...profile, onboardingCompletedAt: new Date() } });
 

@@ -13,6 +13,7 @@ import {
   CHECKIN_COINS,
   CONSUMABLES,
   DEALS,
+  DEFAULT_PLANNED_DAYS,
   EARN_CAPS,
   FOOD_REWARD,
   FREEZE_MIN_STREAK,
@@ -82,6 +83,7 @@ economyRouter.get("/catalog", (_req, res) => {
     weekTarget: WEEK_TARGET_REWARD,
     welcome: WELCOME_COINS,
     streakMilestones: STREAK_MILESTONES,
+    defaultPlannedDays: DEFAULT_PLANNED_DAYS,
     achievements: ACHIEVEMENT_COINS,
     challenges: CHALLENGES.map(({ id, target, reward }) => ({ id, target, reward })),
   });

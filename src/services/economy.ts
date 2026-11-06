@@ -36,6 +36,7 @@ import { evaluateAchievements } from "./achievements.js";
 import {
   clockFor,
   daysToFreeze,
+  daysToHold,
   localDay,
   localHour,
   repairOption,
@@ -120,7 +121,7 @@ export async function applyFreezes(userId: string, clock: Clock): Promise<string
   });
   if (!held?.quantity) return [];
   const before = await streakDays(userId, clock.tz);
-  if (!daysToFreeze(before.trained, before.protectedDays, clock.day, held.quantity).length) return [];
+  if (!daysToFreeze(before.trained, before.protectedDays, clock.day, held.quantity, before.plan).length) return [];
 
   return prisma.$transaction(async (tx) => {
     await lockWallet(tx, userId);
@@ -131,7 +132,7 @@ export async function applyFreezes(userId: string, clock: Clock): Promise<string
     const covered = new Set(
       (await tx.streakProtection.findMany({ where: { userId }, select: { date: true } })).map((p) => p.date),
     );
-    const days = daysToFreeze(before.trained, covered, clock.day, fresh?.quantity ?? 0);
+    const days = daysToFreeze(before.trained, covered, clock.day, fresh?.quantity ?? 0, before.plan);
     if (!days.length) return [];
     await tx.userInventory.update({
       where: { userId_itemId: { userId, itemId: FREEZE_ID } },
@@ -146,8 +147,21 @@ export async function applyFreezes(userId: string, clock: Clock): Promise<string
 export async function streakFor(userId: string): Promise<number> {
   const clock = await clockForUser(userId);
   await applyFreezes(userId, clock).catch(() => {});
-  const { trained, protectedDays } = await streakDays(userId, clock.tz);
-  return streakLength(trained, protectedDays, clock.day);
+  const { trained, protectedDays, plan } = await streakDays(userId, clock.tz);
+  return streakLength(trained, protectedDays, clock.day, plan);
+}
+
+/** Call before saving a new weekly target, so it can't shorten the streak behind you. */
+export async function holdStreakForTarget(userId: string, target: number | undefined) {
+  if (target == null) return;
+  const clock = await clockForUser(userId);
+  const { trained, protectedDays, plan } = await streakDays(userId, clock.tz);
+  const days = daysToHold(trained, protectedDays, clock.day, plan, target);
+  if (!days.length) return;
+  await prisma.streakProtection.createMany({
+    data: days.map((date) => ({ userId, date, source: "plan" })),
+    skipDuplicates: true,
+  });
 }
 
 // ── the week's facts, which challenges measure ─────────────────────────────
@@ -218,7 +232,7 @@ export async function settle(userId: string, clock: Clock): Promise<{ rewards: R
     weekFacts(userId, clock),
     streakDays(userId, clock.tz),
   ]);
-  const streak = streakLength(days.trained, days.protectedDays, day);
+  const streak = streakLength(days.trained, days.protectedDays, day, days.plan);
   const milestones = Object.entries(STREAK_MILESTONES).filter(([n]) => streak >= Number(n));
   const activeChallenges = row.slots.flatMap((id) => {
     const c = challengeById(id);
@@ -376,7 +390,7 @@ export async function economySnapshot(userId: string, clock: Clock) {
   const count = (kind: string, from: Date) =>
     thisWeek.filter((t) => t.kind === kind && t.createdAt >= from).length;
 
-  const repair = repairOption(days.trained, days.protectedDays, clock.day);
+  const repair = repairOption(days.trained, days.protectedDays, clock.day, days.plan);
   return {
     balance: wallet.balance,
     lifetimeEarned: wallet.lifetimeEarned,
@@ -387,7 +401,7 @@ export async function economySnapshot(userId: string, clock: Clock) {
     inventory: Object.fromEntries(inventory.map((i) => [i.itemId, i.quantity])),
     protectedDays: [...days.protectedDays],
     streak: {
-      current: streakLength(days.trained, days.protectedDays, clock.day),
+      current: streakLength(days.trained, days.protectedDays, clock.day, days.plan),
       repair: repair && !recentRepair ? { ...repair, price: STREAK_REPAIR.price } : null,
     },
     week: clock.week,
@@ -548,7 +562,7 @@ export async function rerollChallenge(userId: string, challengeId: string, clock
 
 /** Charge for and apply a streak repair, but only when one can actually be applied. */
 export async function repairStreak(userId: string, clock: Clock) {
-  const { trained } = await streakDays(userId, clock.tz);
+  const { trained, plan } = await streakDays(userId, clock.tz);
   await prisma.$transaction(async (tx) => {
     const walletId = await lockWallet(tx, userId);
     const protections = await tx.streakProtection.findMany({ where: { userId } });
@@ -556,7 +570,7 @@ export async function repairStreak(userId: string, clock: Clock) {
     if (protections.some((p) => p.source === "repair" && p.createdAt.getTime() > cutoff)) {
       throw conflict("You can repair a streak once a week");
     }
-    const option = repairOption(trained, new Set(protections.map((p) => p.date)), clock.day);
+    const option = repairOption(trained, new Set(protections.map((p) => p.date)), clock.day, plan);
     if (!option) throw conflict("There's no streak to repair right now");
 
     await guardedSpend(tx, walletId, STREAK_REPAIR.price);

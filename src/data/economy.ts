@@ -36,7 +36,9 @@ export const FOOD_REWARD = { coins: 10, minItems: 2 };
 export const PROTEIN_COINS = 10;
 export const WEEK_TARGET_REWARD = { perSession: 25, minTarget: 2, maxTarget: 5 };
 export const WELCOME_COINS = 100;
-export const STREAK_MILESTONES: Record<number, number> = { 3: 15, 7: 40, 14: 80, 30: 150, 60: 250, 100: 400 };
+export const STREAK_MILESTONES: Record<number, number> = { 3: 10, 7: 25, 14: 50, 30: 100, 60: 175, 100: 300 };
+/** The training days a week a user with no plan is held to. */
+export const DEFAULT_PLANNED_DAYS = 3;
 
 /** Coins for a finished workout, or null when it doesn't qualify. */
 export function workoutCoins(workingSets: number, seconds: number): number | null {
@@ -89,7 +91,7 @@ export const ACHIEVEMENT_COINS: Record<string, number> = {
 
 // ── consumables ────────────────────────────────────────────────────────────
 export const CONSUMABLES: Record<string, { name: string; price: number; maxHold: number }> = {
-  "cs-freeze": { name: "Streak Freeze", price: 150, maxHold: 2 },
+  "cs-freeze": { name: "Streak Freeze", price: 100, maxHold: 2 },
   "cs-reroll": { name: "Challenge Reroll", price: 60, maxHold: 3 },
   "cs-review": { name: "Kai Deep Review", price: 300, maxHold: 3 },
 };

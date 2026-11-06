@@ -920,7 +920,7 @@ model StreakProtection {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   date      String // "YYYY-MM-DD" in the user's local day
-  source    String // "freeze" | "repair"
+  source    String // "freeze" | "repair" | "plan" (rested under an earlier, lighter plan)
   createdAt DateTime @default(now())
 
   @@unique([userId, date])

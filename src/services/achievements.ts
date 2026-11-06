@@ -42,7 +42,7 @@ export async function evaluateAchievements(userId: string): Promise<Reward[]> {
     prisma.exercisePerformance.count({ where: { supersetGroup: { not: null }, session: { userId, ...WORKED_SESSION } } }),
   ]);
 
-  const streak = streakLength(days.trained, days.protectedDays, clock.day);
+  const streak = streakLength(days.trained, days.protectedDays, clock.day, days.plan);
   const totalKg = sessions.reduce((n, s) => n + s.totalVolumeKg, 0);
   const prLifts = new Set(prs.map((p) => `${p.sessionId}:${p.exerciseId}`)).size;
 

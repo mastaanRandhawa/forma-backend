@@ -1,5 +1,5 @@
 import { prisma } from "../prisma.js";
-import { FREEZE_MIN_STREAK, STREAK_REPAIR } from "../data/economy.js";
+import { DEFAULT_PLANNED_DAYS, FREEZE_MIN_STREAK, STREAK_REPAIR } from "../data/economy.js";
 
 // ── the user's calendar ────────────────────────────────────────────────────
 const DAY_MS = 86_400_000;
@@ -42,38 +42,88 @@ export function clockFor(tz: number, now = new Date()): Clock {
 type Days = ReadonlySet<string>;
 
 /**
- * Consecutive trained days ending today, or yesterday when today isn't trained
- * yet. A protected day bridges the run but doesn't add to it.
+ * The days a week a user plans to train: their weekly target, or the weekdays
+ * they've picked when they have no target, or the default when they have neither.
  */
-export function streakLength(trained: Days, protectedDays: Days, today: string): number {
-  let cursor = trained.has(today) ? today : shiftDay(today, -1);
-  let n = 0;
-  for (let i = 0; i < 1000; i++) {
-    if (trained.has(cursor)) n++;
-    else if (!protectedDays.has(cursor)) break;
-    cursor = shiftDay(cursor, -1);
+export const plannedDays = (target: number | null | undefined, weekdays: readonly number[] = []): number =>
+  Math.min(7, Math.max(1, target || weekdays.length || DEFAULT_PLANNED_DAYS));
+
+/** A stretch of training: its trained days, and the days off it has taken so far. */
+interface Run {
+  /** its first trained day */
+  start: string;
+  length: number;
+  /** days off it didn't get away with, oldest first. Until they're covered the run isn't live. */
+  misses: string[];
+}
+
+const startOfWeek = (day: string) => new Date(`${day}T00:00:00Z`).getUTCDay() === 1;
+
+/**
+ * Follow the calendar from the first trained day to `through`, judging every day
+ * off. Planning `plan` days a week leaves 7 − plan rest days in each Monday-to-
+ * Sunday week, and any more than that are misses, so a miss is exactly the day the
+ * week's target stops being reachable. Protected days use up neither. Training
+ * again after a miss starts a new run, with its rest days back for the week.
+ */
+function follow(trained: Days, protectedDays: Days, through: string, plan: number): { run: Run; broken: Run | null } {
+  let run: Run = { start: "", length: 0, misses: [] };
+  let broken: Run | null = null;
+  let used = 0;
+  const first = [...trained].sort()[0];
+  if (!first) return { run, broken };
+  for (let day = first; day <= through; day = shiftDay(day, 1)) {
+    if (startOfWeek(day)) used = 0;
+    if (trained.has(day)) {
+      if (run.misses.length) {
+        broken = run;
+        run = { start: "", length: 0, misses: [] };
+        used = 0;
+      }
+      if (!run.length) run.start = day;
+      run.length++;
+    } else if (!protectedDays.has(day)) {
+      if (used < 7 - plan) used++;
+      else run.misses.push(day);
+    }
   }
-  return n;
+  return { run, broken };
 }
 
 /**
- * The missed days a freeze should cover right now: every uncovered day between
- * the last covered day and yesterday. Empty when the streak is too short to be
- * worth a freeze, or when the freezes on hand can't cover the whole gap (spending
- * them on a streak that dies anyway would just waste them).
+ * Every day that has to be covered, on top of `days`, for a run begun on `start`
+ * to reach `through` unbroken. Covering a miss can bring up more of them, by taking
+ * away the fresh start that came after it.
  */
-export function daysToFreeze(trained: Days, protectedDays: Days, today: string, freezes: number): string[] {
-  if (freezes <= 0) return [];
-  const gap: string[] = [];
-  let cursor = shiftDay(today, -1);
-  while (!trained.has(cursor) && !protectedDays.has(cursor)) {
-    gap.push(cursor);
-    if (gap.length > freezes) return [];
-    cursor = shiftDay(cursor, -1);
+function coverFor(trained: Days, protectedDays: Days, through: string, plan: number, start: string, days: string[] = []) {
+  const cover = [...days];
+  for (;;) {
+    const { run, broken } = follow(trained, new Set([...protectedDays, ...cover]), through, plan);
+    const more = [...(broken?.misses ?? []), ...run.misses].filter((d) => d >= start);
+    if (!more.length) return cover.sort();
+    cover.push(...more);
   }
-  if (gap.length === 0) return [];
-  if (streakLength(trained, protectedDays, cursor) < FREEZE_MIN_STREAK) return [];
-  return gap.reverse();
+}
+
+/**
+ * Trained days in the current run, including today once it's trained. Rest days
+ * in the plan and protected days bridge the run, but neither adds to it.
+ */
+export function streakLength(trained: Days, protectedDays: Days, today: string, plan: number): number {
+  const { run } = follow(trained, protectedDays, shiftDay(today, -1), plan);
+  return (run.misses.length ? 0 : run.length) + (trained.has(today) ? 1 : 0);
+}
+
+/**
+ * The missed days a freeze should cover right now, oldest first. Rest days in the
+ * plan need no cover. Empty when the streak is too short to be worth a freeze, or
+ * when the freezes on hand can't cover every miss (spending them on a streak that
+ * dies anyway would just waste them).
+ */
+export function daysToFreeze(trained: Days, protectedDays: Days, today: string, freezes: number, plan: number): string[] {
+  const { run } = follow(trained, protectedDays, shiftDay(today, -1), plan);
+  if (!run.misses.length || run.misses.length > freezes || run.length < FREEZE_MIN_STREAK) return [];
+  return run.misses;
 }
 
 export interface RepairOption {
@@ -84,27 +134,39 @@ export interface RepairOption {
 }
 
 /**
- * Whether a recent gap can be repaired: 1–3 missed days, ended within the last
- * 3 days, with a real streak on the far side of it.
+ * Whether a recent break can be repaired: 1–3 missed days, the last of them within
+ * the last 3 days, with a real streak on the far side of it.
  */
-export function repairOption(trained: Days, protectedDays: Days, today: string): RepairOption | null {
-  const covered = (d: string) => trained.has(d) || protectedDays.has(d);
-  let cursor = trained.has(today) ? today : shiftDay(today, -1);
-  let sinceGap = 0;
-  while (covered(cursor)) {
-    sinceGap++;
-    if (sinceGap > STREAK_REPAIR.windowDays) return null;
-    cursor = shiftDay(cursor, -1);
-  }
-  const gap: string[] = [];
-  while (!covered(cursor)) {
-    gap.push(cursor);
-    if (gap.length > STREAK_REPAIR.maxGapDays) return null;
-    cursor = shiftDay(cursor, -1);
-  }
-  if (streakLength(trained, protectedDays, cursor) < STREAK_REPAIR.minPriorRun) return null;
-  const days = gap.reverse();
-  return { days, restoresTo: streakLength(trained, new Set([...protectedDays, ...days]), today) };
+export function repairOption(trained: Days, protectedDays: Days, today: string, plan: number): RepairOption | null {
+  const yesterday = shiftDay(today, -1);
+  const { run, broken } = follow(trained, protectedDays, yesterday, plan);
+  const behind = run.misses.length ? run : broken;
+  if (!behind || behind.length < STREAK_REPAIR.minPriorRun) return null;
+  const end = behind.misses[behind.misses.length - 1]!;
+  const latest = trained.has(today) ? today : yesterday;
+  if (Date.parse(latest) - Date.parse(end) > STREAK_REPAIR.windowDays * DAY_MS) return null;
+
+  const days = coverFor(trained, protectedDays, yesterday, plan, behind.start, behind.misses);
+  if (days.length > STREAK_REPAIR.maxGapDays) return null;
+  return { days, restoresTo: streakLength(trained, new Set([...protectedDays, ...days]), today, plan) };
+}
+
+/** Whether letting today pass untrained would cost the streak, not just use a rest day. */
+export function todayCounts(trained: Days, protectedDays: Days, today: string, plan: number): boolean {
+  return follow(trained, protectedDays, today, plan).run.misses.includes(today);
+}
+
+/**
+ * The days to save before switching plans: whatever the new plan would call a miss
+ * in the current run, and no more. Rest already taken this week still counts against
+ * the new plan, so a switch can't free up rest, and a run that's already broken has
+ * nothing to keep.
+ */
+export function daysToHold(trained: Days, protectedDays: Days, today: string, plan: number, next: number): string[] {
+  const yesterday = shiftDay(today, -1);
+  const { run } = follow(trained, protectedDays, yesterday, plan);
+  if (run.misses.length || !run.length) return [];
+  return coverFor(trained, protectedDays, yesterday, next, run.start);
 }
 
 // ── reading a user's streak ────────────────────────────────────────────────
@@ -115,12 +177,20 @@ export const WORKED_SESSION = {
 } as const;
 
 export async function streakDays(userId: string, tz: number) {
-  const [sessions, protections] = await Promise.all([
+  const [sessions, protections, user] = await Promise.all([
     prisma.workoutSession.findMany({ where: { userId, ...WORKED_SESSION }, select: { startedAt: true } }),
     prisma.streakProtection.findMany({ where: { userId }, select: { date: true } }),
+    prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: {
+        trainingFrequencyTarget: true,
+        programs: { where: { active: true }, orderBy: { createdAt: "desc" }, take: 1, select: { preferredWeekdays: true } },
+      },
+    }),
   ]);
   return {
     trained: new Set(sessions.map((s) => localDay(s.startedAt, tz))),
     protectedDays: new Set(protections.map((p) => p.date)),
+    plan: plannedDays(user.trainingFrequencyTarget, user.programs[0]?.preferredWeekdays),
   };
 }

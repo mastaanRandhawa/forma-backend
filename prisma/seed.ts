@@ -97,7 +97,7 @@ async function main() {
         transactions: {
           create: [
             { type: "earn", amount: 60, label: "5-workout week" },
-            { type: "earn", amount: 80, label: "14-day streak" },
+            { type: "earn", amount: 50, label: "14-day streak" },
             { type: "earn", amount: 40, label: "protein goal · 4 days" },
           ],
         },

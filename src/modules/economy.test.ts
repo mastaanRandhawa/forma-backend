@@ -50,8 +50,8 @@ describe("coin economy", () => {
     await prisma.exercise.deleteMany({ where: { slug: { startsWith: "economy-test-" } } }).catch(() => {});
   });
 
-  /** Back to a clean account with `coins` in the wallet and no history. */
-  async function reset(coins = 0) {
+  /** Back to a clean account with `coins` in the wallet, no history, and this weekly target. */
+  async function reset(coins = 0, target: number | null = null) {
     const wallet = await prisma.wallet.findUniqueOrThrow({ where: { userId } });
     await prisma.walletTransaction.deleteMany({ where: { walletId: wallet.id } });
     await prisma.wallet.update({ where: { id: wallet.id }, data: { balance: coins, lifetimeEarned: coins } });
@@ -65,7 +65,7 @@ describe("coin economy", () => {
     await prisma.chatMessage.deleteMany({ where: { userId } });
     await prisma.userAchievement.deleteMany({ where: { userId } });
     await prisma.userCustomization.deleteMany({ where: { userId } });
-    await prisma.user.update({ where: { id: userId }, data: { tzOffsetMin: 0, trainingFrequencyTarget: null } });
+    await prisma.user.update({ where: { id: userId }, data: { tzOffsetMin: 0, trainingFrequencyTarget: target } });
   }
   beforeEach(() => reset());
 
@@ -278,10 +278,93 @@ describe("coin economy", () => {
   });
 
   // ── streaks ──────────────────────────────────────────────────────────────
+  describe("streak plans", () => {
+    const streak = async () => (await get("/economy")).body.streak.current as number;
+    const held = async () =>
+      (await prisma.userInventory.findUnique({ where: { userId_itemId: { userId, itemId: "cs-freeze" } } }))?.quantity ?? 0;
+
+    it("a rest day in the plan doesn't break a streak, spend a freeze or offer a repair", async () => {
+      await reset(1000, 5);
+      await prisma.userInventory.create({ data: { userId, itemId: "cs-freeze", quantity: 2 } });
+      for (const d of [2, 3, 4]) await trainedOn(d);
+
+      const res = await post("/economy/settle");
+      expect(res.body.events).toEqual([]);
+      expect(res.body.economy.streak).toEqual({ current: 3, repair: null });
+      expect(await held()).toBe(2);
+      expect((await get("/dashboard")).body.streakDays).toBe(3);
+      expect((await get("/progress/consistency")).body.currentStreak).toBe(3);
+    });
+
+    it("more days off than the plan allows still break it", async () => {
+      await reset(0, 6);
+      for (const d of [4, 5, 6]) await trainedOn(d); // three days off leave at least one miss on any weekdays
+      expect(await streak()).toBe(0);
+    });
+
+    it("with no plan set, a user is held to the default", async () => {
+      for (const d of [2, 3, 4]) await trainedOn(d);
+      expect(await streak()).toBe(3);
+      expect((await get("/economy/catalog")).body.defaultPlannedDays).toBe(3);
+    });
+
+    it("an active program's weekdays are the plan when there's no weekly target", async () => {
+      await prisma.trainingProgram.create({
+        data: { userId, name: "Test", durationWeeks: 4, preferredWeekdays: [1, 2, 3, 4, 5, 6] },
+      });
+      for (const d of [4, 5, 6]) await trainedOn(d);
+      expect(await streak()).toBe(0);
+      await prisma.trainingProgram.deleteMany({ where: { userId } });
+    });
+
+    it("raising the target keeps the streak behind you", async () => {
+      await reset(0, 3);
+      for (const d of [2, 4, 6]) await trainedOn(d);
+      expect(await streak()).toBe(3);
+
+      const res = await request(app)
+        .patch("/api/v1/me")
+        .set("Authorization", auth)
+        .send({ trainingFrequencyTarget: 7 });
+      expect(res.status).toBe(200);
+      expect(await streak()).toBe(3);
+      const kept = await prisma.streakProtection.findMany({ where: { userId } });
+      expect(kept.every((p) => p.source === "plan")).toBe(true);
+      expect(kept.map((p) => p.date).sort()).toEqual([5, 3, 1].map((n) => shiftDay(localDay(new Date(), 0), -n)));
+    });
+
+    it("a new target can't revive a streak that's already broken", async () => {
+      await reset(0, 7);
+      for (const d of [2, 3, 4]) await trainedOn(d);
+      expect(await streak()).toBe(0);
+      await request(app).patch("/api/v1/me").set("Authorization", auth).send({ trainingFrequencyTarget: 7 });
+      expect(await prisma.streakProtection.count({ where: { userId } })).toBe(0);
+    });
+
+    it("writes nothing when the new target already allows the run", async () => {
+      await reset(0, 5);
+      for (const d of [2, 3, 4]) await trainedOn(d);
+      await request(app).patch("/api/v1/me").set("Authorization", auth).send({ trainingFrequencyTarget: 3 });
+      await request(app).patch("/api/v1/me").set("Authorization", auth).send({ name: "Sam" });
+      expect(await streak()).toBe(3);
+      expect(await prisma.streakProtection.count({ where: { userId } })).toBe(0);
+    });
+
+    it("onboarding again keeps the streak too", async () => {
+      await reset(0, 3);
+      for (const d of [2, 4, 6]) await trainedOn(d);
+      expect((await post("/me/onboarding", { trainingFrequencyTarget: 7 })).status).toBe(200);
+      expect(await streak()).toBe(3);
+    });
+  });
+
   describe("streak protection", () => {
     const streak = async () => (await get("/economy")).body.streak.current as number;
     const held = async (itemId: string) =>
       (await prisma.userInventory.findUnique({ where: { userId_itemId: { userId, itemId } } }))?.quantity ?? 0;
+
+    // a daily plan makes every day off a miss, whatever day of the week the tests run
+    beforeEach(() => reset(0, 7));
 
     it("without a freeze a missed day breaks the streak", async () => {
       for (const d of [2, 3, 4]) await trainedOn(d);
@@ -289,7 +372,7 @@ describe("coin economy", () => {
     });
 
     it("a freeze really protects the streak, everywhere it's shown", async () => {
-      await reset(500);
+      await reset(500, 7);
       for (const d of [2, 3, 4]) await trainedOn(d);
 
       const bought = await post("/economy/buy", { itemId: "cs-freeze" });
@@ -304,7 +387,6 @@ describe("coin economy", () => {
     });
 
     it("a held freeze fires on its own and only once", async () => {
-      await reset(0);
       await prisma.userInventory.create({ data: { userId, itemId: "cs-freeze", quantity: 2 } });
       for (const d of [2, 3, 4]) await trainedOn(d);
       const first = await post("/economy/settle");
@@ -343,11 +425,11 @@ describe("coin economy", () => {
       await post("/economy/settle");
       await post("/economy/settle");
       const paid = await prisma.walletTransaction.findMany({ where: { kind: "streak", wallet: { userId } } });
-      expect(paid.map((t) => [t.key, t.amount])).toEqual([["streak:3", 15]]);
+      expect(paid.map((t) => [t.key, t.amount])).toEqual([["streak:3", 10]]);
     });
 
     it("repair charges and restores, and only when there's a streak to save", async () => {
-      await reset(1000);
+      await reset(1000, 7);
       expect((await post("/economy/streak-repair")).status).toBe(409);
       expect((await wallet()).balance).toBe(1000);
 
@@ -364,7 +446,7 @@ describe("coin economy", () => {
     });
 
     it("can't repair twice in a week", async () => {
-      await reset(2000);
+      await reset(2000, 7);
       for (const d of [2, 3, 4, 5]) await trainedOn(d);
       expect((await post("/economy/streak-repair")).status).toBe(200);
       // break it again, on a different day: the cooldown still applies
@@ -375,7 +457,7 @@ describe("coin economy", () => {
     });
 
     it("can't repair without the coins", async () => {
-      await reset(100);
+      await reset(100, 7);
       for (const d of [2, 3, 4, 5]) await trainedOn(d);
       expect((await post("/economy/streak-repair")).status).toBe(400);
       expect(await prisma.streakProtection.count({ where: { userId } })).toBe(0);
@@ -533,7 +615,7 @@ describe("coin economy", () => {
 
     it("serves the rule table for the drift check", async () => {
       const body = (await get("/economy/catalog")).body;
-      expect(body.consumables["cs-freeze"].price).toBe(150);
+      expect(body.consumables["cs-freeze"].price).toBe(100);
       expect(body.cosmetics["fr-crown"].price).toBe(3000);
     });
   });
