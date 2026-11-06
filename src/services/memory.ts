@@ -123,14 +123,23 @@ export async function extractMemories(userId: string, text: string): Promise<voi
   );
 }
 
-/** Retrieve the top-N most relevant memories as prompt-injectable strings. */
+/**
+ * Retrieve the top-N most relevant memories as prompt-injectable strings.
+ * Memories only enrich the prompt, so a failed read means none rather than a
+ * failed chat.
+ */
 export async function recallMemories(userId: string, limit = 5): Promise<string[]> {
-  const rows = await prisma.kaiMemory.findMany({
-    where: { userId },
-    orderBy: [{ score: "desc" }, { updatedAt: "desc" }],
-    take: limit,
-  });
-  return rows.map((r) => r.content);
+  try {
+    const rows = await prisma.kaiMemory.findMany({
+      where: { userId },
+      orderBy: [{ score: "desc" }, { updatedAt: "desc" }],
+      take: limit,
+    });
+    return rows.map((r) => r.content);
+  } catch (err) {
+    console.error("memory recall failed", err);
+    return [];
+  }
 }
 
 /** Decay all memory scores for a user slightly (call weekly / on session end). */
