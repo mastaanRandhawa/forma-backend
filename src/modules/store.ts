@@ -34,15 +34,14 @@ export async function awardCoins(userId: string, amount: number, label: string) 
   ]);
 }
 
-storeRouter.post(
-  "/wallet/earn",
-  validate({ body: z.object({ amount: z.number().int().positive().max(1000), label: z.string().min(1) }) }),
-  asyncHandler(async (req, res) => {
-    const { amount, label } = req.body as { amount: number; label: string };
-    await awardCoins(uid(req), amount, label);
-    res.json(await prisma.wallet.findUniqueOrThrow({ where: { userId: uid(req) } }));
-  }),
-);
+/**
+ * Retired: clients used to post their own coin amounts here, which let anyone
+ * with a token mint coins. Coins are now granted server-side from what the user
+ * actually did (see services/rewards.ts). Old app builds get a 410 and carry on.
+ */
+storeRouter.post("/wallet/earn", (_req, res) => {
+  res.status(410).json({ error: { code: "gone", message: "Coins are granted by the server now — see /rewards." } });
+});
 
 // ── catalogue ──────────────────────────────────────────────────────────────
 storeRouter.get(

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { onGoalCompleted, onWorkoutFinished, syncTimezone } from "../services/rewards.js";
 import { z } from "zod";
 import { prisma } from "../prisma.js";
 import { asyncHandler } from "../lib/http.js";
@@ -311,7 +312,12 @@ sessionsRouter.post(
   asyncHandler(async (req, res) => {
     const userId = uid(req);
     const session = await ownSession(userId, req.params.id);
-    if (session.status === "completed") return res.json(await finalizeSession(session.id));
+    await syncTimezone(userId, req.header("x-timezone"));
+    if (session.status === "completed") {
+      // a retried finish still returns the rewards (grants are idempotent, so nothing pays twice)
+      const done = await finalizeSession(session.id);
+      return res.json(Object.assign(done, { rewards: await onWorkoutFinished(userId, session.id).catch(() => null) }));
+    }
     const { durationSeconds, caloriesEstimate } = req.body as { durationSeconds?: number; caloriesEstimate?: number };
     if (durationSeconds || caloriesEstimate) {
       await prisma.workoutSession.update({ where: { id: session.id }, data: { durationSeconds, caloriesEstimate } });
@@ -383,8 +389,9 @@ sessionsRouter.post(
     ]);
     await evaluateAchievements(userId).catch(() => {});
     const progression = await evaluateProgression(userId).catch(() => null);
+    const rewards = await onWorkoutFinished(userId, session.id).catch(() => null);
 
-    res.json(Object.assign(finalized, { progression }));
+    res.json(Object.assign(finalized, { progression, rewards }));
   }),
 );
 
@@ -423,4 +430,5 @@ async function autoIncrementGoal(userId: string, key: string): Promise<void> {
     update: { value: next, completed: next >= goal.target },
     create: { goalId: goal.id, periodKey, value: next, completed: next >= goal.target },
   });
+  if (next >= goal.target) await onGoalCompleted(userId, goal.id, periodKey, goal.label);
 }

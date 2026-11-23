@@ -5,6 +5,7 @@ import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
+import { priceFor } from "../services/rewards.js";
 import {
   CUSTOMIZATION_CATALOGUE,
   DEFAULT_EQUIPPED,
@@ -59,29 +60,29 @@ customizationRouter.post(
     ]);
     if (owned.includes(itemId)) throw conflict("Already owned");
     if (!wallet) throw badRequest("No wallet");
-    if (wallet.balance < entry.price) throw badRequest("Not enough coins");
+    const price = await priceFor(userId, itemId, entry.price, owned);
+    if (wallet.balance < price) throw badRequest("Not enough coins");
 
     const nextOwned = [...owned, itemId];
     const nextEquipped = { ...equipped, [entry.slot]: itemId };
 
-    await prisma.$transaction([
-      prisma.wallet.update({
-        where: { id: wallet.id },
-        data: { balance: { decrement: entry.price } },
-      }),
-      prisma.walletTransaction.create({
-        data: { walletId: wallet.id, type: "spend", amount: entry.price, label: `Unlocked ${itemId}` },
-      }),
-      prisma.userCustomization.update({
+    await prisma.$transaction(async (tx) => {
+      // conditional debit so two concurrent buys can't overdraw
+      const debited = await tx.wallet.updateMany({ where: { id: wallet.id, balance: { gte: price } }, data: { balance: { decrement: price } } });
+      if (debited.count === 0) throw badRequest("Not enough coins");
+      await tx.walletTransaction.create({
+        data: { walletId: wallet.id, type: "spend", amount: price, label: price < entry.price ? `Unlocked ${itemId} (deal)` : `Unlocked ${itemId}` },
+      });
+      await tx.userCustomization.update({
         where: { userId },
         data: { owned: nextOwned, equipped: nextEquipped },
-      }),
-    ]);
+      });
+    });
 
     res.status(201).json({
       owned: nextOwned,
       equipped: nextEquipped,
-      balance: wallet.balance - entry.price,
+      balance: wallet.balance - price,
     });
   }),
 );
