@@ -5,6 +5,7 @@ import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound } from "../lib/errors.js";
+import { onGoalCompleted } from "../services/rewards.js";
 
 export const goalsRouter = Router();
 goalsRouter.use(requireAuth);
@@ -81,7 +82,8 @@ goalsRouter.post(
       update: { value: next, completed: next >= goal.target },
       create: { goalId: goal.id, periodKey: key, value: next, completed: next >= goal.target },
     });
-    res.json({ ...goal, current: entry.value, completed: entry.completed, periodKey: key });
+    const coins = entry.completed ? await onGoalCompleted(userId, goal.id, key, goal.label).catch(() => 0) : 0;
+    res.json({ ...goal, current: entry.value, completed: entry.completed, periodKey: key, coins });
   }),
 );
 

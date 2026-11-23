@@ -40,7 +40,7 @@ export function createApp() {
         cb(null, ok);
       },
       credentials: true,
-      allowedHeaders: ["Content-Type", "Authorization", "X-Client-Platform"],
+      allowedHeaders: ["Content-Type", "Authorization", "X-Client-Platform", "X-Timezone"],
     }),
   );
   app.use(express.json({ limit: "1mb" }));

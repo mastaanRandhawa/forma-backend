@@ -227,6 +227,8 @@ model User {
   weightKg         Float? // denormalized from latest BodyMeasurement
   unitPreference   UnitPreference @default(metric)
   weekStartsMonday Boolean        @default(true)
+  /// IANA zone (e.g. "America/Vancouver") reported by the client; rewards weeks and days use it
+  timezone         String?
 
   fitnessGoal             FitnessGoal?
   experienceLevel         ExperienceLevel?
@@ -264,6 +266,7 @@ model User {
   goals                Goal[]
   achievements         UserAchievement[]
   wallet               Wallet?
+  pledges              WeeklyPledge[]
   ownedStoreItems      UserStoreItem[]
   customization        UserCustomization?
   notifications        Notification[]
@@ -873,6 +876,10 @@ model Wallet {
   userId    String   @unique
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   balance   Int      @default(0)
+  /// streak shields held (max 2) — each covers one missed week once the free pass is spent
+  streakShields Int      @default(0)
+  /// local week starts ("YYYY-MM-DD", Monday) a shield has already covered
+  shieldedWeeks String[] @default([])
   updatedAt DateTime @updatedAt
 
   transactions WalletTransaction[]
@@ -885,9 +892,33 @@ model WalletTransaction {
   type      WalletTxnType
   amount    Int
   label     String
+  /// idempotency key for rule-based grants ("workout:<id>", "checkin:2026-11-22") — a grant is paid at most once
+  key       String?
   createdAt DateTime      @default(now())
 
+  @@unique([walletId, key])
   @@index([walletId, createdAt])
+}
+
+enum PledgeStatus {
+  pending
+  won
+  lost
+}
+
+/// Opt-in commitment: stake coins on hitting this week's session target.
+model WeeklyPledge {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weekStart String // local Monday, "YYYY-MM-DD"
+  stake     Int
+  target    Int
+  status    PledgeStatus @default(pending)
+  createdAt DateTime     @default(now())
+  settledAt DateTime?
+
+  @@unique([userId, weekStart])
 }
 
 model StoreItem {

@@ -10,6 +10,7 @@ import { computeReadiness, readinessFactors } from "../services/readiness.js";
 import { currentStreak } from "../services/achievements.js";
 import { computeTrainingLoad } from "../services/training-load.js";
 import { analyzePatterns } from "../services/patterns.js";
+import { onCheckin, syncTimezone } from "../services/rewards.js";
 
 export const progressRouter = Router();
 progressRouter.use(requireAuth);
@@ -83,8 +84,10 @@ progressRouter.post(
     const body = req.body as {
       sleepH?: number; sleepQuality?: number; fatigue?: number; soreness?: number; note?: string; recordedAt?: Date;
     };
+    await syncTimezone(userId, req.header("x-timezone"));
     const checkin = await prisma.recoveryCheckin.create({ data: { ...body, userId } });
-    res.status(201).json({ checkin, readiness: await readinessFactors(userId) });
+    const coins = await onCheckin(userId).catch(() => 0);
+    res.status(201).json({ checkin, readiness: await readinessFactors(userId), coins });
   }),
 );
 

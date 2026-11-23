@@ -183,6 +183,7 @@ before real JWKS verification is wired.
 | Unlock progression / "show everything" | `GET /me/settings` (`progression` block), `PUT /me/progression { gatingEnabled }`, `POST /me/progression/evaluate` |
 | Paywall (X1) | `GET /subscription/plans`, `POST /subscription/validate-receipt` |
 | Store | `GET /store/items`, `POST /store/items/:id/buy`, `POST /store/items/:id/equip`, `GET /store/wallet` |
+| Rewards (streak, rank, quests, shields, pledge, deals) | `GET /rewards/state`, `POST /rewards/quests/:id/claim`, `POST /rewards/shields`, `POST /rewards/pledge` |
 | Goals | `GET /goals`, `POST /goals/:id/log` |
 | Achievements strip | `GET /achievements` |
 
@@ -313,3 +314,46 @@ Dashboard (`GET /dashboard`) gained provenance flags: `readinessAvailable`,
 Worker job `rescheduleMissedWorkouts` (daily 04:15) shifts past-due scheduled
 program workouts to the next preferred weekday and marks the `ProgramDay`
 `rescheduled`.
+
+## Rewards economy (server-authoritative coins)
+
+The client never sends a coin amount. `POST /store/wallet/earn` is retired
+(410). Coins are granted by `services/rewards.ts` from what the user did, each
+grant keyed for idempotency by a unique `WalletTransaction(walletId, key)`:
+
+| Event | Coins | Key |
+|---|---|---|
+| Finish a workout (first 2 per local day) | 40 + 5 per working set, max 120 | `workout:<sessionId>` |
+| PRs in that session | 50 each, max 3 | `workout-pr:<sessionId>` |
+| First session after ≥ 7 days off | 60 | `comeback:<sessionId>` |
+| Weekly streak reaches 2/4/8/12/26/52 weeks | 60–600 | `wstreak:<n>:<week>` |
+| Recovery check-in (once per local day) | 15 | `checkin:<date>` |
+| Goal completed (once per period) | 30 | `goal:<goalId>:<period>` |
+| Weekly quest claimed | 120–180 | `quest:<id>:<week>` |
+| Pledge kept (stake + 50%) | 75–300 | `pledge:<week>` |
+
+Responses carry what was paid: `POST /sessions/:id/finish` → `rewards`
+(`coins`, `lines`, `xp`, `streak`, `rank`, `targetHit`); `POST /progress/checkin`
+and `POST /goals/:id/log` → `coins`.
+
+**Weeks** run Monday–Sunday in the user's timezone. Clients send the IANA zone
+as `X-Timezone` (stored on `User.timezone`, read on `/rewards/*`, finish and
+check-in); unknown zones fall back to UTC.
+
+**Weekly streak** = consecutive weeks with sessions ≥ `trainingFrequencyTarget`.
+One missed week per 4 is forgiven (free pass); a held **streak shield** (150
+coins, max 2) covers a further miss and is spent automatically when a recent
+break would otherwise end the streak (`Wallet.shieldedWeeks`).
+
+**Rank** = XP over the last 52 weeks: 100 per session + 150 per week on target.
+
+**Pledge** (`POST /rewards/pledge { stake: 50|100|200 }`): Monday–Wednesday,
+at least 2 sessions still to go, one per week. Paid out the moment the target is
+hit; otherwise lost when the week ends (settled lazily on the next read).
+
+**Weekly deals**: 3 paid cosmetics per user per week at 25% off, stable for the
+week. `POST /customization/buy` charges the deal price automatically.
+
+`GET /rewards/state?checkins=false` swaps the check-in quest for "Early sets"
+when the device has manual check-ins turned off; pass the same flag as
+`checkinsEnabled` in POST bodies.
