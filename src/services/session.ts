@@ -8,6 +8,10 @@ export const epley1RM = (weightKg: number, reps: number) =>
 /**
  * Finalize a session: recompute total volume, materialize MuscleActivation rows,
  * detect PRs, and (best-effort) attach a trainer comment. Idempotent.
+ *
+ * Records are judged against history up to the moment the session ended, so a
+ * back-dated or edited session is compared with what came before it, not with
+ * lifts done after it.
  */
 export async function finalizeSession(sessionId: string) {
   const session = await prisma.workoutSession.findUniqueOrThrow({
@@ -22,6 +26,7 @@ export async function finalizeSession(sessionId: string) {
     },
   });
 
+  const cutoff = session.endedAt ?? new Date();
   let totalVolume = 0;
   const activation = new Map<string, { role: MuscleRole; score: number }>();
   const prWrites: Prisma.PersonalRecordCreateManyInput[] = [];
@@ -80,7 +85,7 @@ export async function finalizeSession(sessionId: string) {
 
     // PR detection against historical bests for this exercise
     const priorPRs = await prisma.personalRecord.findMany({
-      where: { userId: session.userId, exerciseId: perf.exerciseId },
+      where: { userId: session.userId, exerciseId: perf.exerciseId, achievedAt: { lte: cutoff } },
       orderBy: { achievedAt: "desc" },
     });
     const priorBest = (t: string) => priorPRs.find((p) => p.recordType === t)?.value ?? 0;
@@ -88,18 +93,18 @@ export async function finalizeSession(sessionId: string) {
     if (bestWeight > priorBest("max_weight") && bestWeightSetId) {
       const linkedSetId = claimSetId(bestWeightSetId);
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_weight",
-        value: bestWeight, previousValue: priorBest("max_weight") || null, setId: linkedSetId, sessionId });
+        value: bestWeight, previousValue: priorBest("max_weight") || null, setId: linkedSetId, sessionId, achievedAt: cutoff });
       if (linkedSetId) setPrIds.push(linkedSetId);
     }
     if (best1RM > priorBest("max_1rm_estimate") && best1RMSetId) {
       const linkedSetId = claimSetId(best1RMSetId);
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_1rm_estimate",
-        value: best1RM, previousValue: priorBest("max_1rm_estimate") || null, setId: linkedSetId, sessionId });
+        value: best1RM, previousValue: priorBest("max_1rm_estimate") || null, setId: linkedSetId, sessionId, achievedAt: cutoff });
       if (linkedSetId) setPrIds.push(linkedSetId);
     }
     if (exVolume > priorBest("max_volume")) {
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_volume",
-        value: Math.round(exVolume), previousValue: priorBest("max_volume") || null, sessionId });
+        value: Math.round(exVolume), previousValue: priorBest("max_volume") || null, sessionId, achievedAt: cutoff });
     }
 
     // timed sets (planks, carries) and cardio: longest effort and furthest distance.
@@ -110,7 +115,7 @@ export async function finalizeSession(sessionId: string) {
       if ((longest.durationSeconds ?? 0) > priorBest("max_duration")) {
         const linkedSetId = claimSetId(longest.id);
         prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_duration",
-          value: longest.durationSeconds!, previousValue: priorBest("max_duration") || null, setId: linkedSetId, sessionId });
+          value: longest.durationSeconds!, previousValue: priorBest("max_duration") || null, setId: linkedSetId, sessionId, achievedAt: cutoff });
         if (linkedSetId) setPrIds.push(linkedSetId);
       }
       const far = timed.filter((s) => (s.distanceM ?? 0) > 0);
@@ -119,7 +124,7 @@ export async function finalizeSession(sessionId: string) {
         if ((furthest.distanceM ?? 0) > priorBest("max_distance")) {
           const linkedSetId = claimSetId(furthest.id);
           prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_distance",
-            value: Math.round(furthest.distanceM!), previousValue: priorBest("max_distance") || null, setId: linkedSetId, sessionId });
+            value: Math.round(furthest.distanceM!), previousValue: priorBest("max_distance") || null, setId: linkedSetId, sessionId, achievedAt: cutoff });
           if (linkedSetId) setPrIds.push(linkedSetId);
         }
       }
@@ -142,10 +147,10 @@ export async function finalizeSession(sessionId: string) {
       data: {
         totalVolumeKg: Math.round(totalVolume * 10) / 10,
         status: "completed",
-        endedAt: session.endedAt ?? new Date(),
+        endedAt: cutoff,
         durationSeconds:
           session.durationSeconds ||
-          Math.round(((session.endedAt ?? new Date()).getTime() - session.startedAt.getTime()) / 1000),
+          Math.round((cutoff.getTime() - session.startedAt.getTime()) / 1000),
       },
     }),
   ]);
@@ -158,4 +163,93 @@ export async function finalizeSession(sessionId: string) {
       personalRecords: { include: { exercise: true } },
     },
   });
+}
+
+/**
+ * Rebuild a session's records, volume and muscle activation from its current sets.
+ * Its own records are dropped first, then re-detected against earlier history.
+ */
+export async function recomputeSession(sessionId: string) {
+  await prisma.$transaction([
+    prisma.exerciseSet.updateMany({ where: { performance: { sessionId }, isPersonalRecord: true }, data: { isPersonalRecord: false } }),
+    prisma.personalRecord.deleteMany({ where: { sessionId } }),
+  ]);
+  return finalizeSession(sessionId);
+}
+
+/**
+ * Re-read a user's history from `since` onwards, oldest first, so a correction (an
+ * edited weight, a deleted session, imported older workouts) flows through to every
+ * later record instead of leaving stale "previous best" values behind.
+ */
+export async function recomputeUserHistory(userId: string, since: Date) {
+  const sessions = await prisma.workoutSession.findMany({
+    where: { userId, status: "completed", OR: [{ endedAt: { gte: since } }, { endedAt: null, startedAt: { gte: since } }] },
+    orderBy: [{ endedAt: "asc" }, { startedAt: "asc" }],
+    select: { id: true },
+  });
+  for (const s of sessions) await recomputeSession(s.id);
+  return sessions.length;
+}
+
+export interface LoggedSetInput {
+  weightKg?: number | null;
+  reps?: number | null;
+  rpe?: number | null;
+  isWarmup?: boolean;
+  durationSeconds?: number | null;
+  distanceM?: number | null;
+}
+export interface LoggedPerformanceInput {
+  exerciseId: string;
+  sets: LoggedSetInput[];
+}
+
+/**
+ * Create a finished workout from data (a session done on paper, or imported). The
+ * session is stored completed with its real date; call recomputeUserHistory once
+ * afterwards so records are judged in date order.
+ */
+export async function createCompletedSession(
+  userId: string,
+  input: { name: string; startedAt: Date; durationSeconds: number; performances: LoggedPerformanceInput[] },
+) {
+  const endedAt = new Date(input.startedAt.getTime() + Math.max(0, input.durationSeconds) * 1000);
+  return prisma.workoutSession.create({
+    data: {
+      userId,
+      name: input.name,
+      startedAt: input.startedAt,
+      endedAt,
+      durationSeconds: Math.max(0, Math.round(input.durationSeconds)),
+      status: "completed",
+      performances: {
+        create: input.performances.map((p, order) => ({
+          exerciseId: p.exerciseId,
+          order,
+          sets: {
+            create: p.sets.map((s, i) => ({
+              setNumber: i + 1,
+              weightKg: s.weightKg ?? null,
+              reps: s.reps ?? null,
+              rpe: s.rpe ?? null,
+              isWarmup: s.isWarmup ?? false,
+              durationSeconds: s.durationSeconds ?? null,
+              distanceM: s.distanceM ?? null,
+              completedAt: endedAt,
+            })),
+          },
+        })),
+      },
+    },
+  });
+}
+
+/** Delete a session and everything it produced (records are not cascaded by the schema). */
+export async function deleteSession(sessionId: string) {
+  await prisma.$transaction([
+    prisma.personalRecord.deleteMany({ where: { sessionId } }),
+    prisma.muscleActivation.deleteMany({ where: { sessionId } }),
+    prisma.workoutSession.delete({ where: { id: sessionId } }),
+  ]);
 }
