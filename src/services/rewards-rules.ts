@@ -40,6 +40,12 @@ export const PLEDGE = {
   minRemaining: 2,
 } as const;
 export const DEALS = { count: 3, discount: 0.25 } as const;
+/** Timed passes that open locked apps — longer blocks are a little cheaper per minute. */
+export const APP_PASSES = [
+  { minutes: 15, price: 30 },
+  { minutes: 30, price: 55 },
+  { minutes: 60, price: 100 },
+] as const;
 
 export const XP = { perSession: 100, perTargetWeek: 150 } as const;
 export const HORIZON_WEEKS = 52;

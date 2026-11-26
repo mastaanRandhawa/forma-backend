@@ -17,6 +17,7 @@ import { badRequest, conflict } from "../lib/errors.js";
 import { notify } from "./notify.js";
 import { CUSTOMIZATION_CATALOGUE } from "../data/customization.js";
 import {
+  APP_PASSES,
   COINS,
   PLEDGE,
   SHIELD,
@@ -287,6 +288,41 @@ export async function makePledge(userId: string, stake: number) {
     });
   } catch (e) {
     if (isUniqueViolation(e)) throw badRequest("You've already pledged this week.");
+    throw e;
+  }
+}
+
+// ── app passes ──────────────────────────────────────────────────────────────
+export async function appPassState(userId: string) {
+  const now = new Date();
+  const [wallet, last] = await Promise.all([
+    prisma.wallet.findUniqueOrThrow({ where: { userId } }),
+    prisma.appPass.findFirst({ where: { userId, expiresAt: { gt: now } }, orderBy: { expiresAt: "desc" } }),
+  ]);
+  // serverNow lets the device turn expiresAt into "time left" even if its clock is wrong
+  return { balance: wallet.balance, expiresAt: last?.expiresAt ?? null, serverNow: now, options: APP_PASSES };
+}
+
+/** Buy a block of unlocked time. Time bought while a pass is running is added to the end of it. */
+export async function buyAppPass(userId: string, minutes: number, requestId: string) {
+  const option = APP_PASSES.find((p) => p.minutes === minutes);
+  if (!option) throw badRequest("Pick one of the offered passes");
+  const alreadyBought = () => prisma.appPass.findUnique({ where: { userId_requestId: { userId, requestId } } });
+  if (await alreadyBought()) return;
+  try {
+    await prisma.$transaction(async (tx) => {
+      // debit first: it locks the wallet row, so concurrent purchases queue up and stack
+      await debit(tx, userId, option.price, `${option.minutes} min app pass`);
+      const now = new Date();
+      const last = await tx.appPass.findFirst({ where: { userId, expiresAt: { gt: now } }, orderBy: { expiresAt: "desc" } });
+      const startsAt = last?.expiresAt ?? now;
+      const expiresAt = new Date(startsAt.getTime() + option.minutes * 60_000);
+      await tx.appPass.create({ data: { userId, requestId, minutes: option.minutes, cost: option.price, startsAt, expiresAt } });
+    });
+  } catch (e) {
+    // a retry that raced the original: the debit rolled back with it. A retry that
+    // finds the coins already spent fails in debit instead, so check for the pass.
+    if (isUniqueViolation(e) || (await alreadyBought())) return;
     throw e;
   }
 }

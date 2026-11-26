@@ -3,7 +3,7 @@ import { z } from "zod";
 import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
-import { buyShield, claimQuest, makePledge, rewardsState, syncTimezone } from "../services/rewards.js";
+import { appPassState, buyAppPass, buyShield, claimQuest, makePledge, rewardsState, syncTimezone } from "../services/rewards.js";
 import { PLEDGE } from "../services/rewards-rules.js";
 
 /**
@@ -65,5 +65,22 @@ rewardsRouter.post(
     const { stake, checkinsEnabled } = req.body as { stake: number; checkinsEnabled: boolean };
     await makePledge(uid(req), stake);
     res.status(201).json(await rewardsState(uid(req), { checkinsEnabled }));
+  }),
+);
+
+rewardsRouter.get(
+  "/app-pass",
+  asyncHandler(async (req, res) => {
+    res.json(await appPassState(uid(req)));
+  }),
+);
+
+rewardsRouter.post(
+  "/app-pass",
+  validate({ body: z.object({ minutes: z.number().int(), requestId: z.string().min(8).max(64) }) }),
+  asyncHandler(async (req, res) => {
+    const { minutes, requestId } = req.body as { minutes: number; requestId: string };
+    await buyAppPass(uid(req), minutes, requestId);
+    res.status(201).json(await appPassState(uid(req)));
   }),
 );

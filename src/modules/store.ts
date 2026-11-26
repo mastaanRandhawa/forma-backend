@@ -79,12 +79,17 @@ storeRouter.post(
     if (existing) throw conflict("Already owned");
     if (wallet.balance < item.price) throw badRequest("Not enough coins");
 
-    const [, , userItem] = await prisma.$transaction([
-      prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { decrement: item.price } } }),
-      prisma.walletTransaction.create({ data: { walletId: wallet.id, type: "spend", amount: item.price, label: `Bought ${item.name}` } }),
-      prisma.userStoreItem.create({ data: { userId, storeItemId: item.id } }),
-    ]);
-    res.status(201).json({ item: userItem, balance: wallet.balance - item.price });
+    // the check above is only a fast path: the decrement itself must refuse to overdraw,
+    // or two purchases at once could both pass it
+    const { userItem, balance } = await prisma.$transaction(async (tx) => {
+      const debited = await tx.wallet.updateMany({ where: { id: wallet.id, balance: { gte: item.price } }, data: { balance: { decrement: item.price } } });
+      if (debited.count === 0) throw badRequest("Not enough coins");
+      await tx.walletTransaction.create({ data: { walletId: wallet.id, type: "spend", amount: item.price, label: `Bought ${item.name}` } });
+      const userItem = await tx.userStoreItem.create({ data: { userId, storeItemId: item.id } });
+      const { balance } = await tx.wallet.findUniqueOrThrow({ where: { id: wallet.id } });
+      return { userItem, balance };
+    });
+    res.status(201).json({ item: userItem, balance });
   }),
 );
 
