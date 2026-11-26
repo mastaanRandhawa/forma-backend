@@ -10,6 +10,7 @@ import { computeReadiness, readinessFactors } from "../services/readiness.js";
 import { currentStreak } from "../services/achievements.js";
 import { computeTrainingLoad } from "../services/training-load.js";
 import { analyzePatterns } from "../services/patterns.js";
+import { buildMuscleStrength } from "../services/muscle-strength.js";
 import { onCheckin, syncTimezone } from "../services/rewards.js";
 
 export const progressRouter = Router();
@@ -580,3 +581,39 @@ const weekKey = (d: Date) => {
   const week = Math.ceil(((t.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
   return `${t.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
 };
+
+// ── strength by muscle ─────────────────────────────────────────────────────
+/**
+ * How long since each muscle was trained, and the lifts behind it with their best
+ * estimated 1RM. A muscle counts as trained when it was a primary mover with a real
+ * share of the session (activation of at least 0.2).
+ */
+progressRouter.get(
+  "/muscle-strength",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const [groups, acts, prs] = await Promise.all([
+      prisma.muscleGroup.findMany({ orderBy: [{ region: "asc" }, { name: "asc" }] }),
+      prisma.muscleActivation.findMany({
+        where: { role: "primary", activationScore: { gte: 0.2 }, session: { userId, status: "completed" } },
+        select: { muscleGroupId: true, session: { select: { endedAt: true, startedAt: true } } },
+      }),
+      prisma.personalRecord.findMany({
+        where: { userId, recordType: "max_1rm_estimate" },
+        include: { exercise: { select: { slug: true, name: true, muscles: { where: { role: "primary" }, select: { muscleGroupId: true } } } } },
+      }),
+    ]);
+    res.json(
+      buildMuscleStrength(
+        groups.map((g) => ({ id: g.id, key: g.key, name: g.name, region: g.region })),
+        acts.map((a) => ({ muscleGroupId: a.muscleGroupId, at: a.session.endedAt ?? a.session.startedAt })),
+        prs.map((p) => ({
+          exercise: { slug: p.exercise.slug, name: p.exercise.name, primaryMuscleGroupIds: p.exercise.muscles.map((m) => m.muscleGroupId) },
+          e1rmKg: p.value,
+          achievedAt: p.achievedAt,
+        })),
+        new Date(),
+      ),
+    );
+  }),
+);
