@@ -30,7 +30,7 @@ goalsRouter.get(
       goals.map(async (g) => {
         const key = periodKey(g.cadence);
         const entry = await prisma.goalEntry.findUnique({ where: { goalId_periodKey: { goalId: g.id, periodKey: key } } });
-        return { ...g, current: entry?.value ?? 0, completed: entry?.completed ?? false, periodKey: key };
+        return { ...g, current: entry?.value ?? 0, completed: (entry?.value ?? 0) >= g.target, periodKey: key };
       }),
     );
     res.json(out);

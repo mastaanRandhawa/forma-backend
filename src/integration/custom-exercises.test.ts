@@ -40,9 +40,9 @@ describe.skipIf(!dbTests)("custom exercises", () => {
   it("is visible to its owner only", async () => {
     const own = await request(app).get("/api/v1/library/exercises?mine=true").set(a.auth);
     expect(own.body.items.map((e: any) => e.id)).toContain(mine.id);
-    const all = await request(app).get("/api/v1/library/exercises?take=100").set(a.auth);
+    const all = await request(app).get("/api/v1/library/exercises?take=100&q=Sandbag%20Shoulder%20Carry").set(a.auth);
     expect(all.body.items.map((e: any) => e.id)).toContain(mine.id);
-    const other = await request(app).get("/api/v1/library/exercises?take=100&q=Sandbag").set(b.auth);
+    const other = await request(app).get("/api/v1/library/exercises?take=100&q=Sandbag%20Shoulder%20Carry").set(b.auth);
     expect(other.body.items).toHaveLength(0);
     expect((await request(app).get(`/api/v1/library/exercises/${mine.slug}`).set(b.auth)).status).toBe(404);
     expect((await request(app).get(`/api/v1/library/exercises/${mine.slug}`).set(a.auth)).status).toBe(200);

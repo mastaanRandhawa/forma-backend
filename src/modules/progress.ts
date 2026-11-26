@@ -57,6 +57,25 @@ progressRouter.post(
   }),
 );
 
+progressRouter.patch(
+  "/metrics/:id",
+  validate({ body: z.object({ value: z.number(), recordedAt: z.coerce.date() }).partial().refine((b) => Object.keys(b).length > 0, "Nothing to change") }),
+  asyncHandler(async (req, res) => {
+    const own = await prisma.progressMetric.findFirst({ where: { id: req.params.id, userId: uid(req) } });
+    if (!own) throw notFound("Entry not found");
+    res.json(await prisma.progressMetric.update({ where: { id: own.id }, data: req.body }));
+  }),
+);
+
+progressRouter.delete(
+  "/metrics/:id",
+  asyncHandler(async (req, res) => {
+    const r = await prisma.progressMetric.deleteMany({ where: { id: req.params.id, userId: uid(req) } });
+    if (!r.count) throw notFound("Entry not found");
+    res.status(204).end();
+  }),
+);
+
 // ── manual recovery check-in (§3.1) → readiness input ──────────────────────
 progressRouter.get("/checkin", asyncHandler(async (req, res) => {
   res.json(
@@ -89,6 +108,40 @@ progressRouter.post(
     const checkin = await prisma.recoveryCheckin.create({ data: { ...body, userId } });
     const coins = await onCheckin(userId).catch(() => 0);
     res.status(201).json({ checkin, readiness: await readinessFactors(userId), coins });
+  }),
+);
+
+progressRouter.patch(
+  "/checkin/:id",
+  validate({
+    body: z
+      .object({
+        sleepH: z.number().min(0).max(24).nullable(),
+        sleepQuality: z.number().int().min(1).max(5).nullable(),
+        fatigue: z.number().int().min(1).max(5).nullable(),
+        soreness: z.number().int().min(1).max(5).nullable(),
+        note: z.string().max(500).nullable(),
+        recordedAt: z.coerce.date(),
+      })
+      .partial()
+      .refine((b) => Object.keys(b).length > 0, "Nothing to change"),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const own = await prisma.recoveryCheckin.findFirst({ where: { id: req.params.id, userId } });
+    if (!own) throw notFound("Check-in not found");
+    const checkin = await prisma.recoveryCheckin.update({ where: { id: own.id }, data: req.body });
+    res.json({ checkin, readiness: await readinessFactors(userId) });
+  }),
+);
+
+progressRouter.delete(
+  "/checkin/:id",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const r = await prisma.recoveryCheckin.deleteMany({ where: { id: req.params.id, userId } });
+    if (!r.count) throw notFound("Check-in not found");
+    res.status(204).end();
   }),
 );
 
@@ -215,6 +268,51 @@ progressRouter.post(
     const row = await prisma.bodyMeasurement.create({ data: { ...req.body, userId } });
     if (row.weightKg) await prisma.user.update({ where: { id: userId }, data: { weightKg: row.weightKg } });
     res.status(201).json(row);
+  }),
+);
+
+/** Keep the profile weight equal to the newest logged weight after an edit or delete. */
+async function syncProfileWeight(userId: string) {
+  const latest = await prisma.bodyMeasurement.findFirst({ where: { userId, weightKg: { not: null } }, orderBy: { recordedAt: "desc" } });
+  if (latest?.weightKg) await prisma.user.update({ where: { id: userId }, data: { weightKg: latest.weightKg } });
+}
+
+const measurementPatch = z
+  .object({
+    weightKg: z.number().positive().nullable(),
+    bodyFatPct: z.number().nullable(),
+    chestCm: z.number().nullable(),
+    waistCm: z.number().nullable(),
+    hipsCm: z.number().nullable(),
+    thighCm: z.number().nullable(),
+    armCm: z.number().nullable(),
+    recordedAt: z.coerce.date(),
+  })
+  .partial()
+  .refine((b) => Object.keys(b).length > 0, "Nothing to change");
+
+/** Fix a body measurement entry (a mistyped weight, the wrong day). */
+progressRouter.patch(
+  "/measurements/:id",
+  validate({ body: measurementPatch }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const own = await prisma.bodyMeasurement.findFirst({ where: { id: req.params.id, userId } });
+    if (!own) throw notFound("Measurement not found");
+    const row = await prisma.bodyMeasurement.update({ where: { id: own.id }, data: req.body });
+    await syncProfileWeight(userId);
+    res.json(row);
+  }),
+);
+
+progressRouter.delete(
+  "/measurements/:id",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const r = await prisma.bodyMeasurement.deleteMany({ where: { id: req.params.id, userId } });
+    if (!r.count) throw notFound("Measurement not found");
+    await syncProfileWeight(userId);
+    res.status(204).end();
   }),
 );
 
