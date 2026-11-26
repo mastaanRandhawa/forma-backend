@@ -110,6 +110,15 @@ enum PersonalRecordType {
   max_distance // furthest single cardio effort, in metres
 }
 
+/// How next session's target is chosen. `auto` is the RPE-based engine; the rest are named, published schemes.
+enum ProgressionRule {
+  auto
+  linear
+  greyskull
+  double_progression
+  added_time
+}
+
 /// How sets of an exercise are logged: weight × reps, a duration, or time + distance.
 enum TrackingType {
   reps
@@ -578,6 +587,7 @@ model Workout {
   estimatedDurationMin Int?
   targetMuscleKeys     String[]      @default([])
   notes                String?
+  progressionRule      ProgressionRule @default(auto) // the default rule for every exercise in this routine
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -602,6 +612,8 @@ model WorkoutExercise {
   targetWeightKg Float?
   targetRestSec  Int?
   targetDurationSec Int? // timed exercises: the hold or effort to aim for, per set
+  progressionRule   ProgressionRule? // overrides the routine's rule for this exercise; null = inherit
+  incrementKg       Float? // how much a rule adds on success; null = 2.5 kg (5 lb)
   notes          String?
   supersetGroup  Int? // exercises sharing a value are grouped (W16)
   supersetType   SupersetType @default(straight)
@@ -655,6 +667,7 @@ model ExercisePerformance {
   prescribedWeightKg  Float?
   prescribedReps      Int?
   prescribedRpe       Float?
+  prescribedDurationSec Int? // timed exercises: the target hold for each set
   pct1rmTarget        Float?  // e.g. 0.80 = "80% of estimated 1RM"; null = absolute weight
   prescriptionAuditId String?              @unique
   prescriptionAudit   RecommendationAudit? @relation(fields: [prescriptionAuditId], references: [id])

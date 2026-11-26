@@ -14,6 +14,8 @@ import { evaluateProgression } from "../services/progression.js";
 import { sessionComment } from "../services/ai.js";
 import { notify } from "../services/notify.js";
 import { prescribeExercise } from "../services/prescription.js";
+import { prescribeNamedExercise } from "../services/prescribe-named.js";
+import { type NamedRule } from "../services/progression-rules.js";
 import { shouldDeload } from "../services/deload.js";
 import { readinessAdjustment } from "../services/readiness.js";
 
@@ -132,16 +134,34 @@ sessionsRouter.post(
         const templateEx = workout.exercises.find((e) => e.order === perf.order);
         if (!templateEx) continue;
         try {
-          const { prescription, inputs } = await prescribeExercise(
-            userId,
-            perf.exerciseId,
-            {
-              targetRepsMin: templateEx.targetRepsMin,
-              targetRepsMax: templateEx.targetRepsMax,
-              targetWeightKg: templateEx.targetWeightKg,
-            },
-            { unit, deload },
-          );
+          // an exercise's own rule wins over the routine's; "auto" is the RPE-based engine
+          const named = templateEx.progressionRule ?? workout.progressionRule;
+          const { prescription, inputs } =
+            named === "auto"
+              ? await prescribeExercise(
+                  userId,
+                  perf.exerciseId,
+                  {
+                    targetRepsMin: templateEx.targetRepsMin,
+                    targetRepsMax: templateEx.targetRepsMax,
+                    targetWeightKg: templateEx.targetWeightKg,
+                  },
+                  { unit, deload },
+                )
+              : await prescribeNamedExercise(
+                  userId,
+                  perf.exerciseId,
+                  named as NamedRule,
+                  {
+                    targetSets: templateEx.targetSets,
+                    targetRepsMin: templateEx.targetRepsMin,
+                    targetRepsMax: templateEx.targetRepsMax,
+                    targetWeightKg: templateEx.targetWeightKg,
+                    targetDurationSec: templateEx.targetDurationSec,
+                  },
+                  { unit, deload, incrementKg: templateEx.incrementKg },
+                );
+          const durationTarget = (prescription as { targetDurationSec?: number | null }).targetDurationSec ?? null;
           const audit = await prisma.recommendationAudit.create({
             data: {
               userId,
@@ -153,6 +173,7 @@ sessionsRouter.post(
                 targetWeightKg: prescription.targetWeightKg,
                 targetReps: prescription.targetReps,
                 targetRpe: prescription.targetRpe,
+                targetDurationSec: durationTarget,
                 note: prescription.note,
               } as never,
             },
@@ -163,6 +184,7 @@ sessionsRouter.post(
               prescribedWeightKg: prescription.targetWeightKg,
               prescribedReps: prescription.targetReps,
               prescribedRpe: prescription.targetRpe,
+              prescribedDurationSec: durationTarget,
               prescriptionAuditId: audit.id,
             },
           });
