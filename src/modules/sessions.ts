@@ -6,6 +6,7 @@ import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
+import { assertExercisesVisible } from "../lib/exercises.js";
 import { createCompletedSession, deleteSession, finalizeSession, recomputeUserHistory } from "../services/session.js";
 import { evaluateAchievements } from "../services/achievements.js";
 import { generateInsights } from "../services/insights.js";
@@ -219,8 +220,7 @@ sessionsRouter.post(
     const userId = uid(req);
     const body = req.body as { name: string; startedAt: Date; durationSeconds: number; performances: { exerciseId: string; sets: z.infer<typeof loggedSet>[] }[] };
     if (body.startedAt.getTime() > Date.now() + FUTURE_SLACK_MS) throw badRequest("A logged workout can't be in the future");
-    const ids = [...new Set(body.performances.map((p) => p.exerciseId))];
-    if ((await prisma.exercise.count({ where: { id: { in: ids } } })) !== ids.length) throw badRequest("Unknown exercise in this workout");
+    await assertExercisesVisible(userId, body.performances.map((p) => p.exerciseId));
 
     const created = await createCompletedSession(userId, body);
     await recomputeUserHistory(userId, body.startedAt);
@@ -303,6 +303,7 @@ sessionsRouter.post(
   asyncHandler(async (req, res) => {
     const session = await ownSession(uid(req), req.params.id);
     const { exerciseId, order } = req.body as { exerciseId: string; order: number };
+    await assertExercisesVisible(uid(req), [exerciseId]);
     const perf = await prisma.exercisePerformance.upsert({
       where: { sessionId_order: { sessionId: req.params.id, order } },
       update: { exerciseId },

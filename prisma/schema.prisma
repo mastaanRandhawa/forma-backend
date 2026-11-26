@@ -264,6 +264,7 @@ model User {
   injuries             InjuryNote[]
   equipment            UserEquipment[]
   workouts             Workout[]
+  customExercises      Exercise[]       @relation("CustomExercises")
   programs             TrainingProgram[]
   sessions             WorkoutSession[]
   personalRecords      PersonalRecord[]
@@ -491,6 +492,13 @@ model Exercise {
   imageStartUrl String? // start-position illustration (RepDB flat 512px WebP)
   imageEndUrl   String? // peak / end-position illustration (single-pose moves reuse imageStartUrl)
 
+  // ── Custom exercises (source = "custom") — private to their owner ──────────
+  ownerUserId String?
+  owner       User?   @relation("CustomExercises", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  mediaUrl    String? // the owner's own photo, GIF or short video (https link; files are not stored here)
+  mediaKind   String? // "image" | "gif" | "video"
+  guideUrl    String? // a link to a form guide the owner trusts
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -501,6 +509,7 @@ model Exercise {
 
   @@index([category])
   @@index([source])
+  @@index([ownerUserId])
 }
 
 model ExerciseMuscle {

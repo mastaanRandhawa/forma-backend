@@ -4,7 +4,8 @@
  *
  *   RUN_DB_TESTS=1 npm test
  *
- * Every user they create has an `it-` email prefix and is removed afterwards.
+ * Every user they create has an `it-` email prefix; each test file removes only the
+ * users it created, so files can run in parallel.
  */
 import request from "supertest";
 import { createApp } from "../app.js";
@@ -19,6 +20,8 @@ export interface TestUser {
   auth: { Authorization: string; "X-Client-Platform": string };
 }
 
+const created: string[] = [];
+
 export async function makeUser(label: string): Promise<TestUser> {
   const email = `it-${label}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@forma.test`;
   const res = await request(app)
@@ -26,6 +29,7 @@ export async function makeUser(label: string): Promise<TestUser> {
     .set("X-Client-Platform", "native")
     .send({ email, password: "Test-Pass-12345x", firstName: "IT" });
   if (res.status >= 300) throw new Error(`register failed: ${res.status} ${JSON.stringify(res.body)}`);
+  created.push(res.body.user.id);
   // these tests are about training data, not the verification flow
   await prisma.user.update({ where: { id: res.body.user.id }, data: { emailVerifiedAt: new Date() } });
   const token = res.body.accessToken as string;
@@ -33,7 +37,7 @@ export async function makeUser(label: string): Promise<TestUser> {
 }
 
 export async function cleanupUsers() {
-  await prisma.user.deleteMany({ where: { email: { startsWith: "it-" } } });
+  await prisma.user.deleteMany({ where: { id: { in: created.splice(0) } } });
 }
 
 export const exerciseBySlug = async (slug: string) => prisma.exercise.findUniqueOrThrow({ where: { slug } });

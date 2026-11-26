@@ -6,6 +6,7 @@ import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
 import { generateWorkout } from "../services/plan.js";
+import { assertExercisesVisible } from "../lib/exercises.js";
 
 export const workoutsRouter = Router();
 workoutsRouter.use(requireAuth);
@@ -72,6 +73,7 @@ workoutsRouter.post(
   validate({ body: workoutInput }),
   asyncHandler(async (req, res) => {
     const { exercises, ...data } = req.body as z.infer<typeof workoutInput>;
+    await assertExercisesVisible(uid(req), exercises.map((e) => e.exerciseId));
     const workout = await prisma.workout.create({
       data: { ...data, userId: uid(req), exercises: { create: exercises } },
       include: { exercises: { include: { exercise: true }, orderBy: { order: "asc" } } },
@@ -87,6 +89,7 @@ workoutsRouter.put(
     const existing = await prisma.workout.findFirst({ where: { id: req.params.id, userId: uid(req) } });
     if (!existing) throw notFound("Workout not found");
     const { exercises, ...data } = req.body as Partial<z.infer<typeof workoutInput>>;
+    if (exercises) await assertExercisesVisible(uid(req), exercises.map((e) => e.exerciseId));
     const workout = await prisma.$transaction(async (tx) => {
       if (exercises) {
         await tx.workoutExercise.deleteMany({ where: { workoutId: existing.id } });
