@@ -213,6 +213,8 @@ sessionsRouter.put(
       rpe: z.number().min(1).max(10).nullable().optional(),
       restSecondsTaken: z.number().int().nonnegative().optional(),
       isWarmup: z.boolean().optional(),
+      durationSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
+      distanceM: z.number().min(0).max(1_000_000).nullable().optional(),
       formScore: z.number().min(0).max(100).nullable().optional(),
       romValue: z.number().nullable().optional(),
       completed: z.boolean().optional(),

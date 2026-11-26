@@ -106,6 +106,15 @@ enum PersonalRecordType {
   max_1rm_estimate
   max_reps
   max_volume
+  max_duration // longest timed hold or effort (plank, wall sit), in seconds
+  max_distance // furthest single cardio effort, in metres
+}
+
+/// How sets of an exercise are logged: weight × reps, a duration, or time + distance.
+enum TrackingType {
+  reps
+  time
+  cardio
 }
 
 enum ProgressMetricType {
@@ -461,6 +470,7 @@ model Exercise {
   videoAssetRef          String?
   supportsCameraTracking Boolean         @default(false)
   alternativeSlugs       String[]        @default([])
+  trackingType           TrackingType    @default(reps)
 
   // ── Enrichment layer — provenance + RepDB (repdb.co) free-tier fields ──────
   // `source` = "native" (hand-curated seed) | "repdb" (imported). `externalId`
@@ -582,6 +592,7 @@ model WorkoutExercise {
   targetRepsMax  Int?
   targetWeightKg Float?
   targetRestSec  Int?
+  targetDurationSec Int? // timed exercises: the hold or effort to aim for, per set
   notes          String?
   supersetGroup  Int? // exercises sharing a value are grouped (W16)
   supersetType   SupersetType @default(straight)
@@ -656,6 +667,8 @@ model ExerciseSet {
   isWarmup         Boolean             @default(false)
   setType          SetType             @default(standard)
   amrapRepsLogged  Int?                // actual reps logged on an AMRAP set
+  durationSeconds  Int?                // timed sets (plank, carry) and cardio: how long the set lasted
+  distanceM        Float?              // cardio: distance covered, in metres
   completedAt      DateTime?
   formScore        Float? // camera-tracked only
   romValue         Float?

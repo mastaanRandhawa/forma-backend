@@ -101,6 +101,29 @@ export async function finalizeSession(sessionId: string) {
       prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_volume",
         value: Math.round(exVolume), previousValue: priorBest("max_volume") || null, sessionId });
     }
+
+    // timed sets (planks, carries) and cardio: longest effort and furthest distance.
+    // They carry no reps, so they never touch volume or the 1RM estimate above.
+    const timed = perf.sets.filter((s) => !s.isWarmup && (s.durationSeconds ?? 0) > 0);
+    if (timed.length) {
+      const longest = timed.reduce((a, b) => ((b.durationSeconds ?? 0) > (a.durationSeconds ?? 0) ? b : a));
+      if ((longest.durationSeconds ?? 0) > priorBest("max_duration")) {
+        const linkedSetId = claimSetId(longest.id);
+        prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_duration",
+          value: longest.durationSeconds!, previousValue: priorBest("max_duration") || null, setId: linkedSetId, sessionId });
+        if (linkedSetId) setPrIds.push(linkedSetId);
+      }
+      const far = timed.filter((s) => (s.distanceM ?? 0) > 0);
+      if (far.length) {
+        const furthest = far.reduce((a, b) => ((b.distanceM ?? 0) > (a.distanceM ?? 0) ? b : a));
+        if ((furthest.distanceM ?? 0) > priorBest("max_distance")) {
+          const linkedSetId = claimSetId(furthest.id);
+          prWrites.push({ userId: session.userId, exerciseId: perf.exerciseId, recordType: "max_distance",
+            value: Math.round(furthest.distanceM!), previousValue: priorBest("max_distance") || null, setId: linkedSetId, sessionId });
+          if (linkedSetId) setPrIds.push(linkedSetId);
+        }
+      }
+    }
   }
 
   await prisma.$transaction([

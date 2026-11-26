@@ -116,6 +116,8 @@ async function main() {
       forceType: n.forceType,
       mechanic: n.mechanic,
       discipline: n.discipline,
+      // cardio is logged as time + distance; static holds (planks, stretches) as a duration
+      trackingType: (n.discipline === "cardio" ? "cardio" : n.forceType === "static" ? "time" : "reps") as "reps" | "time" | "cardio",
       isUnilateral: n.isUnilateral,
       isBodyweight: n.isBodyweight,
       metValue: n.metValue,

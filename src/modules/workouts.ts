@@ -19,6 +19,7 @@ const exerciseInput = z.object({
   targetRepsMax: z.number().int().optional(),
   targetWeightKg: z.number().optional(),
   targetRestSec: z.number().int().optional(),
+  targetDurationSec: z.number().int().min(1).max(7200).optional(),
   notes: z.string().optional(),
   supersetGroup: z.number().int().nullable().optional(),
   supersetType: z.enum(["straight", "superset", "circuit"]).optional(),
