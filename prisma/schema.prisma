@@ -286,6 +286,7 @@ model User {
   achievements         UserAchievement[]
   wallet               Wallet?
   pledges              WeeklyPledge[]
+  appPasses            AppPass[]
   ownedStoreItems      UserStoreItem[]
   customization        UserCustomization?
   notifications        Notification[]
@@ -954,6 +955,24 @@ model WeeklyPledge {
   settledAt DateTime?
 
   @@unique([userId, weekStart])
+}
+
+/// Coins spent to open the apps the user chose to lock, for a block of time.
+/// Which apps are locked stays on the device; the server only sells the time.
+model AppPass {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  minutes   Int
+  cost      Int
+  /// client-generated id, so a retried purchase is charged once
+  requestId String
+  startsAt  DateTime
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([userId, requestId])
+  @@index([userId, expiresAt])
 }
 
 model StoreItem {

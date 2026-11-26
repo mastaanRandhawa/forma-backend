@@ -183,7 +183,7 @@ before real JWKS verification is wired.
 | Unlock progression / "show everything" | `GET /me/settings` (`progression` block), `PUT /me/progression { gatingEnabled }`, `POST /me/progression/evaluate` |
 | Paywall (X1) | `GET /subscription/plans`, `POST /subscription/validate-receipt` |
 | Store | `GET /store/items`, `POST /store/items/:id/buy`, `POST /store/items/:id/equip`, `GET /store/wallet` |
-| Rewards (streak, rank, quests, shields, pledge, deals) | `GET /rewards/state`, `POST /rewards/quests/:id/claim`, `POST /rewards/shields`, `POST /rewards/pledge` |
+| Rewards (streak, rank, quests, shields, pledge, deals) | `GET /rewards/state`, `POST /rewards/quests/:id/claim`, `POST /rewards/shields`, `POST /rewards/pledge`, `GET`/`POST /rewards/app-pass` |
 | Goals | `GET /goals`, `POST /goals/:id/log` |
 | Achievements strip | `GET /achievements` |
 
@@ -353,6 +353,11 @@ hit; otherwise lost when the week ends (settled lazily on the next read).
 
 **Weekly deals**: 3 paid cosmetics per user per week at 25% off, stable for the
 week. `POST /customization/buy` charges the deal price automatically.
+
+**App passes** (`POST /rewards/app-pass { minutes: 15|30|60, requestId }`):
+30 / 55 / 100 coins for time in the apps the user locked on their device. Time
+bought while a pass is running is added to its end. `requestId` makes retries
+free. Both calls return `{ balance, expiresAt, serverNow, options }`.
 
 `GET /rewards/state?checkins=false` swaps the check-in quest for "Early sets"
 when the device has manual check-ins turned off; pass the same flag as
