@@ -29,11 +29,13 @@ async function main() {
       update: {
         name: ex.name, category: ex.category, movementPattern: ex.movementPattern ?? null,
         equipment: ex.equipment, difficulty: ex.difficulty, supportsCameraTracking: ex.camera,
+        trackingType: ex.tracking ?? "reps",
         alternativeSlugs: ex.alternatives ?? [],
       },
       create: {
         slug: ex.slug, name: ex.name, category: ex.category, movementPattern: ex.movementPattern ?? null,
         equipment: ex.equipment, difficulty: ex.difficulty, supportsCameraTracking: ex.camera,
+        trackingType: ex.tracking ?? "reps",
         alternativeSlugs: ex.alternatives ?? [],
       },
     });

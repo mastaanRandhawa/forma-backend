@@ -6,19 +6,38 @@ import { asyncHandler } from "../lib/http.js";
 import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
-import { finalizeSession } from "../services/session.js";
+import { assertExercisesVisible } from "../lib/exercises.js";
+import { createCompletedSession, deleteSession, finalizeSession, recomputeUserHistory } from "../services/session.js";
 import { evaluateAchievements } from "../services/achievements.js";
 import { generateInsights } from "../services/insights.js";
 import { evaluateProgression } from "../services/progression.js";
 import { sessionComment } from "../services/ai.js";
 import { notify } from "../services/notify.js";
 import { prescribeExercise } from "../services/prescription.js";
+import { prescribeNamedExercise } from "../services/prescribe-named.js";
+import { type NamedRule } from "../services/progression-rules.js";
 import { shouldDeload } from "../services/deload.js";
 import { readinessAdjustment } from "../services/readiness.js";
 
 export const sessionsRouter = Router();
 sessionsRouter.use(requireAuth);
 const uid = (req: unknown) => (req as AuthedRequest).userId;
+
+/** After any change to a finished workout, rebuild its numbers and every later record. */
+async function rebuildIfFinished(session: { userId: string; status: string; startedAt: Date; endedAt: Date | null }) {
+  if (session.status !== "completed") return;
+  await recomputeUserHistory(session.userId, session.endedAt ?? session.startedAt);
+}
+
+const loggedSet = z.object({
+  weightKg: z.number().min(0).max(2000).nullable().optional(),
+  reps: z.number().int().min(0).max(1000).nullable().optional(),
+  rpe: z.number().min(1).max(10).nullable().optional(),
+  isWarmup: z.boolean().optional(),
+  durationSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
+  distanceM: z.number().min(0).max(1_000_000).nullable().optional(),
+});
+const FUTURE_SLACK_MS = 5 * 60_000;
 
 async function ownSession(userId: string, id: string) {
   const s = await prisma.workoutSession.findFirst({ where: { id, userId } });
@@ -115,16 +134,34 @@ sessionsRouter.post(
         const templateEx = workout.exercises.find((e) => e.order === perf.order);
         if (!templateEx) continue;
         try {
-          const { prescription, inputs } = await prescribeExercise(
-            userId,
-            perf.exerciseId,
-            {
-              targetRepsMin: templateEx.targetRepsMin,
-              targetRepsMax: templateEx.targetRepsMax,
-              targetWeightKg: templateEx.targetWeightKg,
-            },
-            { unit, deload },
-          );
+          // an exercise's own rule wins over the routine's; "auto" is the RPE-based engine
+          const named = templateEx.progressionRule ?? workout.progressionRule;
+          const { prescription, inputs } =
+            named === "auto"
+              ? await prescribeExercise(
+                  userId,
+                  perf.exerciseId,
+                  {
+                    targetRepsMin: templateEx.targetRepsMin,
+                    targetRepsMax: templateEx.targetRepsMax,
+                    targetWeightKg: templateEx.targetWeightKg,
+                  },
+                  { unit, deload },
+                )
+              : await prescribeNamedExercise(
+                  userId,
+                  perf.exerciseId,
+                  named as NamedRule,
+                  {
+                    targetSets: templateEx.targetSets,
+                    targetRepsMin: templateEx.targetRepsMin,
+                    targetRepsMax: templateEx.targetRepsMax,
+                    targetWeightKg: templateEx.targetWeightKg,
+                    targetDurationSec: templateEx.targetDurationSec,
+                  },
+                  { unit, deload, incrementKg: templateEx.incrementKg },
+                );
+          const durationTarget = (prescription as { targetDurationSec?: number | null }).targetDurationSec ?? null;
           const audit = await prisma.recommendationAudit.create({
             data: {
               userId,
@@ -136,6 +173,7 @@ sessionsRouter.post(
                 targetWeightKg: prescription.targetWeightKg,
                 targetReps: prescription.targetReps,
                 targetRpe: prescription.targetRpe,
+                targetDurationSec: durationTarget,
                 note: prescription.note,
               } as never,
             },
@@ -146,6 +184,7 @@ sessionsRouter.post(
               prescribedWeightKg: prescription.targetWeightKg,
               prescribedReps: prescription.targetReps,
               prescribedRpe: prescription.targetRpe,
+              prescribedDurationSec: durationTarget,
               prescriptionAuditId: audit.id,
             },
           });
@@ -185,19 +224,115 @@ sessionsRouter.post(
   }),
 );
 
+/** Log a workout that already happened (done on paper, or backfilled). Stored finished, with its real date. */
+sessionsRouter.post(
+  "/log",
+  validate({
+    body: z.object({
+      name: z.string().min(1).max(120).default("Logged workout"),
+      startedAt: z.coerce.date(),
+      durationSeconds: z.number().int().min(0).max(86_400).default(3600),
+      performances: z
+        .array(z.object({ exerciseId: z.string(), sets: z.array(loggedSet).min(1).max(60) }))
+        .min(1)
+        .max(30),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const body = req.body as { name: string; startedAt: Date; durationSeconds: number; performances: { exerciseId: string; sets: z.infer<typeof loggedSet>[] }[] };
+    if (body.startedAt.getTime() > Date.now() + FUTURE_SLACK_MS) throw badRequest("A logged workout can't be in the future");
+    await assertExercisesVisible(userId, body.performances.map((p) => p.exerciseId));
+
+    const created = await createCompletedSession(userId, body);
+    await recomputeUserHistory(userId, body.startedAt);
+    res.status(201).json(
+      await prisma.workoutSession.findUniqueOrThrow({
+        where: { id: created.id },
+        include: {
+          performances: { include: { exercise: true, sets: { orderBy: { setNumber: "asc" } } }, orderBy: { order: "asc" } },
+          personalRecords: { include: { exercise: true } },
+        },
+      }),
+    );
+  }),
+);
+
+/** Edit a finished workout's name, date or duration. Records are re-read from the corrected history. */
+sessionsRouter.patch(
+  "/:id",
+  validate({
+    body: z
+      .object({
+        name: z.string().min(1).max(120),
+        startedAt: z.coerce.date(),
+        durationSeconds: z.number().int().min(0).max(86_400),
+      })
+      .partial()
+      .refine((b) => Object.keys(b).length > 0, "Nothing to change"),
+  }),
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const session = await ownSession(userId, req.params.id);
+    if (session.status !== "completed") throw badRequest("Only finished workouts can be edited");
+    const b = req.body as { name?: string; startedAt?: Date; durationSeconds?: number };
+    if (b.startedAt && b.startedAt.getTime() > Date.now() + FUTURE_SLACK_MS) throw badRequest("A workout can't be in the future");
+    const startedAt = b.startedAt ?? session.startedAt;
+    const durationSeconds = b.durationSeconds ?? session.durationSeconds;
+    await prisma.workoutSession.update({
+      where: { id: session.id },
+      data: { name: b.name, startedAt, durationSeconds, endedAt: new Date(startedAt.getTime() + durationSeconds * 1000) },
+    });
+    const since = new Date(Math.min(startedAt.getTime(), (session.endedAt ?? session.startedAt).getTime(), session.startedAt.getTime()));
+    await recomputeUserHistory(userId, since);
+    res.json(
+      await prisma.workoutSession.findUniqueOrThrow({
+        where: { id: session.id },
+        include: { performances: { include: { exercise: true, sets: { orderBy: { setNumber: "asc" } } }, orderBy: { order: "asc" } }, personalRecords: { include: { exercise: true } } },
+      }),
+    );
+  }),
+);
+
+/** Remove an exercise from a finished workout. */
+sessionsRouter.delete(
+  "/:id/performances/:perfId",
+  asyncHandler(async (req, res) => {
+    const session = await ownSession(uid(req), req.params.id);
+    const r = await prisma.exercisePerformance.deleteMany({ where: { id: req.params.perfId, sessionId: req.params.id } });
+    if (!r.count) throw notFound("Performance not found");
+    await rebuildIfFinished(session);
+    res.status(204).end();
+  }),
+);
+
+/** Delete a workout and its records; later records are re-read without it. */
+sessionsRouter.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const userId = uid(req);
+    const session = await ownSession(userId, req.params.id);
+    await deleteSession(session.id);
+    if (session.status === "completed") await recomputeUserHistory(userId, session.endedAt ?? session.startedAt);
+    res.status(204).end();
+  }),
+);
+
 /** Add or replace an exercise performance mid-session (e.g. exercise swap W10). */
 sessionsRouter.post(
   "/:id/performances",
   validate({ body: z.object({ exerciseId: z.string(), order: z.number().int().min(0) }) }),
   asyncHandler(async (req, res) => {
-    await ownSession(uid(req), req.params.id);
+    const session = await ownSession(uid(req), req.params.id);
     const { exerciseId, order } = req.body as { exerciseId: string; order: number };
+    await assertExercisesVisible(uid(req), [exerciseId]);
     const perf = await prisma.exercisePerformance.upsert({
       where: { sessionId_order: { sessionId: req.params.id, order } },
       update: { exerciseId },
       create: { sessionId: req.params.id, exerciseId, order },
       include: { exercise: true, sets: true },
     });
+    await rebuildIfFinished(session);
     res.status(201).json(perf);
   }),
 );
@@ -213,6 +348,8 @@ sessionsRouter.put(
       rpe: z.number().min(1).max(10).nullable().optional(),
       restSecondsTaken: z.number().int().nonnegative().optional(),
       isWarmup: z.boolean().optional(),
+      durationSeconds: z.number().int().min(0).max(86_400).nullable().optional(),
+      distanceM: z.number().min(0).max(1_000_000).nullable().optional(),
       formScore: z.number().min(0).max(100).nullable().optional(),
       romValue: z.number().nullable().optional(),
       completed: z.boolean().optional(),
@@ -220,7 +357,7 @@ sessionsRouter.put(
   }),
   asyncHandler(async (req, res) => {
     const userId = uid(req);
-    await ownSession(userId, req.params.id);
+    const session = await ownSession(userId, req.params.id);
     const perf = await prisma.exercisePerformance.findFirst({
       where: { id: req.params.perfId, sessionId: req.params.id },
     });
@@ -234,6 +371,8 @@ sessionsRouter.put(
       update: { ...data, completedAt: completed ? new Date() : undefined },
       create: { performanceId: perf.id, setNumber, ...data, completedAt: completed ? new Date() : null },
     });
+    // fixing a finished workout: volume, muscle activation and records follow the change
+    await rebuildIfFinished(session);
     res.json(set);
   }),
 );
@@ -241,10 +380,11 @@ sessionsRouter.put(
 sessionsRouter.delete(
   "/:id/performances/:perfId/sets/:setNumber",
   asyncHandler(async (req, res) => {
-    await ownSession(uid(req), req.params.id);
+    const session = await ownSession(uid(req), req.params.id);
     await prisma.exerciseSet.deleteMany({
       where: { setNumber: Number(req.params.setNumber), performance: { id: req.params.perfId, sessionId: req.params.id } },
     });
+    await rebuildIfFinished(session);
     res.status(204).end();
   }),
 );

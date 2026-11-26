@@ -106,6 +106,24 @@ enum PersonalRecordType {
   max_1rm_estimate
   max_reps
   max_volume
+  max_duration // longest timed hold or effort (plank, wall sit), in seconds
+  max_distance // furthest single cardio effort, in metres
+}
+
+/// How next session's target is chosen. `auto` is the RPE-based engine; the rest are named, published schemes.
+enum ProgressionRule {
+  auto
+  linear
+  greyskull
+  double_progression
+  added_time
+}
+
+/// How sets of an exercise are logged: weight × reps, a duration, or time + distance.
+enum TrackingType {
+  reps
+  time
+  cardio
 }
 
 enum ProgressMetricType {
@@ -255,6 +273,7 @@ model User {
   injuries             InjuryNote[]
   equipment            UserEquipment[]
   workouts             Workout[]
+  customExercises      Exercise[]       @relation("CustomExercises")
   programs             TrainingProgram[]
   sessions             WorkoutSession[]
   personalRecords      PersonalRecord[]
@@ -461,6 +480,7 @@ model Exercise {
   videoAssetRef          String?
   supportsCameraTracking Boolean         @default(false)
   alternativeSlugs       String[]        @default([])
+  trackingType           TrackingType    @default(reps)
 
   // ── Enrichment layer — provenance + RepDB (repdb.co) free-tier fields ──────
   // `source` = "native" (hand-curated seed) | "repdb" (imported). `externalId`
@@ -481,6 +501,13 @@ model Exercise {
   imageStartUrl String? // start-position illustration (RepDB flat 512px WebP)
   imageEndUrl   String? // peak / end-position illustration (single-pose moves reuse imageStartUrl)
 
+  // ── Custom exercises (source = "custom") — private to their owner ──────────
+  ownerUserId String?
+  owner       User?   @relation("CustomExercises", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  mediaUrl    String? // the owner's own photo, GIF or short video (https link; files are not stored here)
+  mediaKind   String? // "image" | "gif" | "video"
+  guideUrl    String? // a link to a form guide the owner trusts
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -491,6 +518,7 @@ model Exercise {
 
   @@index([category])
   @@index([source])
+  @@index([ownerUserId])
 }
 
 model ExerciseMuscle {
@@ -559,6 +587,7 @@ model Workout {
   estimatedDurationMin Int?
   targetMuscleKeys     String[]      @default([])
   notes                String?
+  progressionRule      ProgressionRule @default(auto) // the default rule for every exercise in this routine
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -582,6 +611,9 @@ model WorkoutExercise {
   targetRepsMax  Int?
   targetWeightKg Float?
   targetRestSec  Int?
+  targetDurationSec Int? // timed exercises: the hold or effort to aim for, per set
+  progressionRule   ProgressionRule? // overrides the routine's rule for this exercise; null = inherit
+  incrementKg       Float? // how much a rule adds on success; null = 2.5 kg (5 lb)
   notes          String?
   supersetGroup  Int? // exercises sharing a value are grouped (W16)
   supersetType   SupersetType @default(straight)
@@ -635,6 +667,7 @@ model ExercisePerformance {
   prescribedWeightKg  Float?
   prescribedReps      Int?
   prescribedRpe       Float?
+  prescribedDurationSec Int? // timed exercises: the target hold for each set
   pct1rmTarget        Float?  // e.g. 0.80 = "80% of estimated 1RM"; null = absolute weight
   prescriptionAuditId String?              @unique
   prescriptionAudit   RecommendationAudit? @relation(fields: [prescriptionAuditId], references: [id])
@@ -656,6 +689,8 @@ model ExerciseSet {
   isWarmup         Boolean             @default(false)
   setType          SetType             @default(standard)
   amrapRepsLogged  Int?                // actual reps logged on an AMRAP set
+  durationSeconds  Int?                // timed sets (plank, carry) and cardio: how long the set lasted
+  distanceM        Float?              // cardio: distance covered, in metres
   completedAt      DateTime?
   formScore        Float? // camera-tracked only
   romValue         Float?

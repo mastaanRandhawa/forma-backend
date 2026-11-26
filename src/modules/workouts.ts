@@ -6,10 +6,14 @@ import { validate } from "../middleware/validate.js";
 import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 import { notFound, badRequest } from "../lib/errors.js";
 import { generateWorkout } from "../services/plan.js";
+import { assertExercisesVisible } from "../lib/exercises.js";
+import { RULE_INFO } from "../services/progression-rules.js";
 
 export const workoutsRouter = Router();
 workoutsRouter.use(requireAuth);
 const uid = (req: unknown) => (req as AuthedRequest).userId;
+
+const progressionRule = z.enum(["auto", "linear", "greyskull", "double_progression", "added_time"]);
 
 const exerciseInput = z.object({
   exerciseId: z.string(),
@@ -19,6 +23,9 @@ const exerciseInput = z.object({
   targetRepsMax: z.number().int().optional(),
   targetWeightKg: z.number().optional(),
   targetRestSec: z.number().int().optional(),
+  targetDurationSec: z.number().int().min(1).max(7200).optional(),
+  progressionRule: progressionRule.nullable().optional(),
+  incrementKg: z.number().positive().max(50).nullable().optional(),
   notes: z.string().optional(),
   supersetGroup: z.number().int().nullable().optional(),
   supersetType: z.enum(["straight", "superset", "circuit"]).optional(),
@@ -32,7 +39,13 @@ const workoutInput = z.object({
   estimatedDurationMin: z.number().int().optional(),
   targetMuscleKeys: z.array(z.string()).default([]),
   notes: z.string().optional(),
+  progressionRule: progressionRule.optional(), // the routine's default; the database default is "auto"
   exercises: z.array(exerciseInput).default([]),
+});
+
+/** The progression rules a routine can use, in plain words. */
+workoutsRouter.get("/progression-rules", (_req, res) => {
+  res.json(RULE_INFO);
 });
 
 workoutsRouter.get(
@@ -71,6 +84,7 @@ workoutsRouter.post(
   validate({ body: workoutInput }),
   asyncHandler(async (req, res) => {
     const { exercises, ...data } = req.body as z.infer<typeof workoutInput>;
+    await assertExercisesVisible(uid(req), exercises.map((e) => e.exerciseId));
     const workout = await prisma.workout.create({
       data: { ...data, userId: uid(req), exercises: { create: exercises } },
       include: { exercises: { include: { exercise: true }, orderBy: { order: "asc" } } },
@@ -86,6 +100,7 @@ workoutsRouter.put(
     const existing = await prisma.workout.findFirst({ where: { id: req.params.id, userId: uid(req) } });
     if (!existing) throw notFound("Workout not found");
     const { exercises, ...data } = req.body as Partial<z.infer<typeof workoutInput>>;
+    if (exercises) await assertExercisesVisible(uid(req), exercises.map((e) => e.exerciseId));
     const workout = await prisma.$transaction(async (tx) => {
       if (exercises) {
         await tx.workoutExercise.deleteMany({ where: { workoutId: existing.id } });

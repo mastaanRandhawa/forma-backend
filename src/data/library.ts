@@ -38,6 +38,8 @@ type Ex = {
   equipment: string[];
   difficulty: "beginner" | "intermediate" | "advanced";
   camera: boolean;
+  /** how sets are logged; omit for weight × reps */
+  tracking?: "reps" | "time" | "cardio";
   primary: string[];
   secondary?: string[];
   alternatives?: string[];
@@ -76,5 +78,5 @@ export const EXERCISES: Ex[] = [
   { slug: "bicep-curl", name: "Bicep Curl", category: "pull", movementPattern: "curl",
     equipment: ["dumbbell"], difficulty: "beginner", camera: false, repdbId: "bicep-curl", primary: ["biceps"], secondary: ["forearms"] },
   { slug: "plank", name: "Plank", category: "core", movementPattern: "anti_extension",
-    equipment: ["bodyweight"], difficulty: "beginner", camera: true, repdbId: "plank", primary: ["abs"], secondary: ["obliques"] },
+    equipment: ["bodyweight"], difficulty: "beginner", camera: true, tracking: "time", repdbId: "plank", primary: ["abs"], secondary: ["obliques"] },
 ];
