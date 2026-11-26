@@ -20,6 +20,7 @@
     "prisma:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:import-repdb": "tsx src/scripts/import-repdb.ts",
+    "db:import-fed": "tsx src/scripts/import-free-exercise-db.ts",
     "db:backfill": "tsx src/scripts/backfill.ts",
     "db:reset": "prisma migrate reset --force"
   },
